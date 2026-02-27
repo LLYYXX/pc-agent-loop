@@ -13,6 +13,21 @@
 - 测SOP质量：input指定SOP名（如"用ezgmail_sop查看最近3封未读邮件"），排除导航干扰，失败即SOP问题
 - 测导航能力：input只写目标，验证subagent能自主从insight找到正确SOP。禁止内联SOP内容
 
+### 测试驱动SOP优化方法
+
+**场景**：发现SOP存在路径/参数/步骤问题，需验证修改效果
+
+**方法**：
+1. 创建test_path测试环境：`temp/test_path/`，写入input.txt描述测试目标
+2. 启动subagent：`python agentmain.py --task test_path`（从代码根启动）
+3. 观察output.txt和实际文件操作，验证SOP修改是否生效
+4. 清理test_path，重复测试直到验证通过
+
+**关键发现**（已验证）：
+- **Insight优先级>SOP**：subagent优先读Insight索引，Insight中的警告/约束会覆盖SOP中的说明
+- **subagent的cwd**：和主agent相同（都在temp/），subagent不知道自己是subagent
+- **路径引用**：从temp/访问memory/用`../memory/`，访问autonomous_reports/用`./autonomous_reports/`（在temp/下）
+
 **标准流程（map-reduce）**：
 1. 主agent准备阶段：爬取/dump数据，存为多个独立输入文件
 2. 分发：对每个文件启动一个subagent处理（主agent自己也可以处理其中一个）

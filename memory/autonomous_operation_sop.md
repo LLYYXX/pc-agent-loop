@@ -1,9 +1,11 @@
 # 自主行动 SOP (探测-报告-执行)
 
+⚠️ **路径警告**：autonomous_reports 在 temp/ 下，用`./autonomous_reports/`访问，**不是**`../memory/autonomous_reports/`或`../autonomous_reports/`！
+
 授权你进行自主行动，只要不对环境造成副作用都可进行。
 请先选择核心目标，再选择一个小目标进行。最终探测结果形成报告（含操作申请），待用户回来确认后再进行可能的写入或修改操作。
 
-> **must call update_working_memory**：`自主探索｜≤15回合｜只有cwd内可写｜用户不在(问题存报告)｜收尾:重读本SOP确认报告目录+更新报告目录内history｜产出=报告+记忆提案`
+> **must call update_working_checkpoint**：`自主探索｜≤15回合｜只有cwd内可写｜用户不在(问题存报告)｜报告目录:./autonomous_reports/｜收尾:重读本SOP确认报告目录+更新history｜产出=报告+记忆提案`
 
 ## 📋 大纲
 - 报告目录与规则
@@ -12,7 +14,8 @@
 
 ## 报告目录与规则
 
-⚠️ 历史记录唯一位置：`./autonomous_reports/history.txt`， 在此目录内，禁止写到其他任何路径。
+⚠️ 历史记录唯一位置：`./autonomous_reports/history.txt`
+
 报告存于 `./autonomous_reports/`，文件名 `RXX_简短描述.md`（XX从 history.txt 推断自增）。
 完成后在 history.txt 首行 prepend 一条：`RXX | 日期 | 类型 | 主题 | 结论`（严格单行）。已处理报告归档至 `archived/`。
 

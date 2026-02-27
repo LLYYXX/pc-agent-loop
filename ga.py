@@ -467,13 +467,21 @@ class GenericAgentHandler(BaseHandler):
         except: pass
         return prompt
 
+    def next_prompt_patcher(self, next_prompt, outcome, turn):
+        if turn % 30 == 0:
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。你必须总结情况进行ask_user，不允许继续重试。"
+        elif turn % 7 == 0:
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
+        elif turn % 10 == 0: next_prompt += get_global_memory()
+        return next_prompt
+
 def get_global_memory():
     prompt = "\n"
     try:
         with open('memory/global_mem_insight.txt', 'r', encoding='utf-8') as f: insight = f.read()
         with open('assets/insight_fixed_structure.txt', 'r', encoding='utf-8') as f: structure = f.read()
         prompt += f"\n[Memory]\n"
-        prompt += f'cwd = {os.path.abspath("./temp")}  （用./引用）\n'
+        prompt += f'cwd = {os.path.abspath("./temp")} （用./引用）\n'
         prompt += structure + '\n../memory/global_mem_insight.txt:\n'
         prompt += insight + "\n"
     except FileNotFoundError: pass

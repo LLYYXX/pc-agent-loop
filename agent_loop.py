@@ -16,6 +16,7 @@ def try_call_generator(func, *args, **kwargs):
 class BaseHandler:
     def tool_before_callback(self, tool_name, args, response): pass
     def tool_after_callback(self, tool_name, args, response, ret): pass
+    def next_prompt_patcher(self, next_prompt, outcome, turn): return next_prompt
     def dispatch(self, tool_name, args, response):
         method_name = f"do_{tool_name}"
         if hasattr(self, method_name):
@@ -85,9 +86,6 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if type(outcome.data) in [dict, list] else str(outcome.data) 
             next_prompt += f"<tool_result>\n{datastr}\n</tool_result>\n\n"
         next_prompt += outcome.next_prompt
-        if (turn+1) % 7 == 0:
-            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn+1} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
-        if (turn+1) % 30 == 0:
-            next_prompt += f"\n\n### [DANGER] 已连续执行第 {turn+1} 轮。你必须总结情况进行ask_user，不允许继续重试。"
+        next_prompt = handler.next_prompt_patcher(next_prompt, outcome, turn+1)
         messages = [{"role": "user", "content": next_prompt}]
     return {'result': 'MAX_TURNS_EXCEEDED'}
