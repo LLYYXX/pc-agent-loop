@@ -61,6 +61,14 @@ def public_access(allowed):
     return not allowed or "*" in allowed
 
 
+def to_allowed_set(value):
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        value = [value]
+    return {str(x).strip() for x in value if str(x).strip()}
+
+
 def allowed_label(allowed):
     return "public" if public_access(allowed) else sorted(allowed)
 

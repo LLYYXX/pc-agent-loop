@@ -1,11 +1,4 @@
-import glob
-import json
-import os
-import queue as Q
-import re
-import sys
-import threading
-import time
+import json, os, re, sys, threading, time
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
@@ -15,9 +8,9 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 
 from agentmain import GeneraticAgent
+from chatapp_common import clean_reply, extract_files, format_restore, public_access, strip_files, to_allowed_set
 from llmcore import mykeys
 
-_TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif"}
 _AUDIO_EXTS = {".opus", ".mp3", ".wav", ".m4a", ".aac"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -39,37 +32,13 @@ MEDIA_DIR = os.path.join(TEMP_DIR, "feishu_media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
-def _clean(text):
-    for pat in _TAG_PATS:
-        text = re.sub(pat, "", text, flags=re.DOTALL)
-    return re.sub(r"\n{3,}", "\n\n", text).strip() or "..."
-
-
-def _extract_files(text):
-    return re.findall(r"\[FILE:([^\]]+)\]", text or "")
-
-
-def _strip_files(text):
-    return re.sub(r"\[FILE:[^\]]+\]", "", text or "").strip()
-
-
 def _display_text(text):
-    return _strip_files(_clean(text)) or "..."
-
-
-def _to_allowed_set(value):
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        value = [value]
-    return {str(x).strip() for x in value if str(x).strip()}
+    return strip_files(clean_reply(text)) or "..."
 
 
 def _parse_json(raw):
-    if not raw:
-        return {}
     try:
-        return json.loads(raw)
+        return json.loads(raw) if raw else {}
     except Exception:
         return {}
 
@@ -229,20 +198,16 @@ def _extract_post_content(content_json):
 
 APP_ID = str(mykeys.get("fs_app_id", "") or "").strip()
 APP_SECRET = str(mykeys.get("fs_app_secret", "") or "").strip()
-ALLOWED_USERS = _to_allowed_set(mykeys.get("fs_allowed_users", []))
-PUBLIC_ACCESS = not ALLOWED_USERS or "*" in ALLOWED_USERS
+ALLOWED_USERS = to_allowed_set(mykeys.get("fs_allowed_users", []))
+PUBLIC_ACCESS = public_access(ALLOWED_USERS)
 
 agent = GeneraticAgent()
 threading.Thread(target=agent.run, daemon=True).start()
 client, user_tasks = None, {}
 
 
-def create_client():
-    return lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).log_level(lark.LogLevel.INFO).build()
-
-
-def _card(text):
-    return json.dumps({"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": text}]}, ensure_ascii=False)
+def create_client(): return lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).log_level(lark.LogLevel.INFO).build()
+def _card(text): return json.dumps({"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": text}]}, ensure_ascii=False)
 
 
 def send_message(open_id, content, msg_type="text", use_card=False):
@@ -270,6 +235,10 @@ def update_message(message_id, content):
     if not response.success():
         print(f"[ERROR] update_message 失败: {response.code}, {response.msg}")
     return response.success()
+
+
+def _read_file_obj(response):
+    return response.file.read() if hasattr(response.file, "read") else response.file
 
 
 def _upload_image_sync(file_path):
@@ -305,51 +274,29 @@ def _upload_file_sync(file_path):
     return None
 
 
-def _download_image_sync(message_id, image_key):
-    try:
-        request = GetMessageResourceRequest.builder().message_id(message_id).file_key(image_key).type("image").build()
-        response = client.im.v1.message_resource.get(request)
-        if response.success():
-            data = response.file.read() if hasattr(response.file, "read") else response.file
-            return data, response.file_name
-        print(f"[ERROR] download image failed: {response.code}, {response.msg}")
-    except Exception as e:
-        print(f"[ERROR] download image failed {image_key}: {e}")
-    return None, None
-
-
-def _download_file_sync(message_id, file_key, resource_type="file"):
-    if resource_type == "audio":
-        resource_type = "file"
+def _download_resource(message_id, file_key, resource_type, label):
     try:
         request = GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
         response = client.im.v1.message_resource.get(request)
         if response.success():
-            data = response.file.read() if hasattr(response.file, "read") else response.file
-            return data, response.file_name
-        print(f"[ERROR] download {resource_type} failed: {response.code}, {response.msg}")
+            return _read_file_obj(response), response.file_name
+        print(f"[ERROR] download {label} failed: {response.code}, {response.msg}")
     except Exception as e:
-        print(f"[ERROR] download {resource_type} failed {file_key}: {e}")
+        print(f"[ERROR] download {label} failed {file_key}: {e}")
     return None, None
 
 
 def _download_and_save_media(msg_type, content_json, message_id):
-    data, filename = None, None
-    if msg_type == "image":
-        image_key = content_json.get("image_key")
-        if image_key and message_id:
-            data, filename = _download_image_sync(message_id, image_key)
-            if not filename:
-                filename = f"{image_key[:16]}.jpg"
-    elif msg_type in ("audio", "file", "media"):
-        file_key = content_json.get("file_key")
-        if file_key and message_id:
-            data, filename = _download_file_sync(message_id, file_key, msg_type)
-            if not filename:
-                filename = file_key[:16]
-            if msg_type == "audio" and filename and not filename.endswith(".opus"):
-                filename = f"{filename}.opus"
-    if data and filename:
+    file_key = content_json.get("image_key") if msg_type == "image" else content_json.get("file_key")
+    resource_type = "image" if msg_type == "image" else ("file" if msg_type == "audio" else msg_type)
+    default_ext = ".jpg" if msg_type == "image" else ".opus" if msg_type == "audio" else ""
+    if not (file_key and message_id):
+        return None, None
+    data, filename = _download_resource(message_id, file_key, resource_type, msg_type)
+    if data:
+        filename = filename or f"{file_key[:16]}{default_ext}"
+        if msg_type == "audio" and filename and not filename.endswith(".opus"):
+            filename += ".opus"
         file_path = os.path.join(MEDIA_DIR, os.path.basename(filename))
         with open(file_path, "wb") as f:
             f.write(data)
@@ -358,13 +305,7 @@ def _download_and_save_media(msg_type, content_json, message_id):
 
 
 def _describe_media(msg_type, file_path, filename):
-    if msg_type == "image":
-        return f"[image: {filename}]\n[Image: source: {file_path}]"
-    if msg_type == "audio":
-        return f"[audio: {filename}]\n[File: source: {file_path}]"
-    if msg_type in ("file", "media"):
-        return f"[{msg_type}: {filename}]\n[File: source: {file_path}]"
-    return f"[{msg_type}]\n[File: source: {file_path}]"
+    return f"[{msg_type}: {filename}]\n[{'Image' if msg_type == 'image' else 'File'}: source: {file_path}]"
 
 
 def _send_local_file(open_id, file_path):
@@ -372,24 +313,28 @@ def _send_local_file(open_id, file_path):
         send_message(open_id, f"⚠️ 文件不存在: {file_path}")
         return False
     ext = os.path.splitext(file_path)[1].lower()
-    if ext in _IMAGE_EXTS:
-        image_key = _upload_image_sync(file_path)
-        if image_key:
-            send_message(open_id, json.dumps({"image_key": image_key}, ensure_ascii=False), msg_type="image")
-            return True
-    else:
-        file_key = _upload_file_sync(file_path)
-        if file_key:
-            msg_type = "media" if ext in _AUDIO_EXTS or ext in _VIDEO_EXTS else "file"
-            send_message(open_id, json.dumps({"file_key": file_key}, ensure_ascii=False), msg_type=msg_type)
-            return True
+    is_image = ext in _IMAGE_EXTS
+    file_key = _upload_image_sync(file_path) if is_image else _upload_file_sync(file_path)
+    if file_key:
+        key_name, msg_type = ("image_key", "image") if is_image else ("file_key", "media" if ext in _AUDIO_EXTS or ext in _VIDEO_EXTS else "file")
+        send_message(open_id, json.dumps({key_name: file_key}, ensure_ascii=False), msg_type=msg_type)
+        return True
     send_message(open_id, f"⚠️ 文件发送失败: {os.path.basename(file_path)}")
     return False
 
 
 def _send_generated_files(open_id, raw_text):
-    for file_path in _extract_files(raw_text):
+    for file_path in extract_files(raw_text):
         _send_local_file(open_id, file_path)
+
+
+def _append_media(parts, image_paths, msg_type, file_path, filename):
+    if not (file_path and filename):
+        parts.append(f"[{msg_type}: download failed]")
+        return
+    parts.append(_describe_media(msg_type, file_path, filename))
+    if msg_type == "image":
+        image_paths.append(file_path)
 
 
 def _build_user_message(message):
@@ -407,19 +352,10 @@ def _build_user_message(message):
             parts.append(text)
         for image_key in image_keys:
             file_path, filename = _download_and_save_media("image", {"image_key": image_key}, message_id)
-            if file_path and filename:
-                parts.append(_describe_media("image", file_path, filename))
-                image_paths.append(file_path)
-            else:
-                parts.append("[image: download failed]")
+            _append_media(parts, image_paths, "image", file_path, filename)
     elif msg_type in ("image", "audio", "file", "media"):
         file_path, filename = _download_and_save_media(msg_type, content_json, message_id)
-        if file_path and filename:
-            parts.append(_describe_media(msg_type, file_path, filename))
-            if msg_type == "image":
-                image_paths.append(file_path)
-        else:
-            parts.append(f"[{msg_type}: download failed]")
+        _append_media(parts, image_paths, msg_type, file_path, filename)
     elif msg_type in ("share_chat", "share_user", "interactive", "share_calendar_event", "system", "merge_forward"):
         parts.append(_extract_share_card_content(content_json, msg_type))
     else:
@@ -500,22 +436,13 @@ def handle_command(open_id, cmd):
         send_message(open_id, f"状态: {'🟢 空闲' if not agent.is_running else '🔴 运行中'}")
     elif cmd == "/restore":
         try:
-            files = glob.glob("./temp/model_responses_*.txt")
-            if not files:
-                return send_message(open_id, "❌ 没有找到历史记录")
-            latest = max(files, key=os.path.getmtime)
-            with open(latest, "r", encoding="utf-8") as f:
-                content = f.read()
-            users = re.findall(r"=== USER ===\n(.+?)(?==== |$)", content, re.DOTALL)
-            resps = re.findall(r"=== Response ===.*?\n(.+?)(?==== Prompt|$)", content, re.DOTALL)
-            count = 0
-            for u, r in zip(users, resps):
-                u, r = u.strip(), r.strip()[:500]
-                if u and r:
-                    agent.history.extend([f"[USER]: {u}", f"[Agent] {r}"])
-                    count += 1
+            restored_info, err = format_restore()
+            if err:
+                return send_message(open_id, err)
+            restored, fname, count = restored_info
             agent.abort()
-            send_message(open_id, f"✅ 已恢复 {count} 轮对话\n来源: {os.path.basename(latest)}\n(仅恢复上下文，请输入新问题继续)")
+            agent.history.extend(restored)
+            send_message(open_id, f"✅ 已恢复 {count} 轮对话\n来源: {fname}\n(仅恢复上下文，请输入新问题继续)")
         except Exception as e:
             send_message(open_id, f"❌ 恢复失败: {e}")
     else:
