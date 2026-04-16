@@ -5,7 +5,8 @@
 - 目录：`temp/{task_name}/`（cwd在temp/时即`./{task_name}/`）
 - 启动：`python agentmain.py --task {name} [--input "短文本"] [--bg] [--llm_no N]`（cwd=代码根）
 - `--input`自动建目录+清旧output+写input.txt；长文本先手动写input.txt再启动(不带--input)
-- `--bg`后台(print PID exit)，可同一code_run内sleep后poll；非--bg禁合并启动+轮询
+- 优先用`--bg`后台(print PID exit)，可同一code_run内sleep后poll；非--bg禁合并启动+轮询
+- subagent的cwd还是temp，不是task目录
 - input：目标+约束即可，subagent同等智能。**禁写步骤/过度描述**，大量数据给路径
 - 通信：output.txt(append,`[ROUND END]`=轮完成) → 写reply.txt继续 → 不写10min退出。reply后输出为output1/2/3.txt(同格式)
 - 干预文件：`_stop`(当轮结束退出) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)

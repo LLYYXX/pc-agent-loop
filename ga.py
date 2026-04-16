@@ -364,8 +364,7 @@ class GenericAgentHandler(BaseHandler):
     
     def do_file_write(self, args, response):
         '''用于对整个文件的大量处理，精细修改要用file_patch。
-        需要将要写入的内容放在<file_content>标签内，或者放在代码块中。
-        '''
+        需要将要写入的内容放在<file_content>标签内，或者放在代码块中'''
         path = self._get_abs_path(args.get("path", ""))
         mode = args.get("mode", "overwrite")  # overwrite/append/prepend
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
@@ -381,7 +380,7 @@ class GenericAgentHandler(BaseHandler):
         blocks = extract_robust_content(response.content)
         if not blocks:
             yield f"[Status] ❌ 失败: 未在回复中找到<file_content>代码块内容\n"
-            return StepOutcome({"status": "error", "msg": "No content found. Put content inside <file_content>...</file_content> tags in your reply body and call file_write."}, next_prompt="\n")
+            return StepOutcome({"status": "error", "msg": "No content found. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
             new_content = expand_file_refs(blocks, base_dir=self.cwd)
             if mode == "prepend":
