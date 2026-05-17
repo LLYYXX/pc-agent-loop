@@ -1,4 +1,4 @@
-"""Configuration for Local Semantic Overlay."""
+"""Configuration for Local Semantic Overlay v2 (Area-Aware Annotation-First)."""
 
 from __future__ import annotations
 
@@ -20,34 +20,10 @@ WARM_STALE_DAYS = 180
 DEFAULT_RECALL_LIMIT = 8
 DEFAULT_EVIDENCE_LIMIT = 12
 DEFAULT_SEED_ROUTE_BUDGET = 40
-DEFAULT_SURVEY_MAX_CLUSTERS = 240
-DEFAULT_SURVEY_MAX_DIRS = 2500
+DEFAULT_SURVEY_MAX_DEPTH = 2
+DEFAULT_EVIDENCE_BUDGET = 400
+DEFAULT_PACKET_SIZE = 6
 DEFAULT_TEXT_HEAD_CHARS = 2400
-
-GENERIC_ROUTE_TAGS = {
-    "file",
-    "files",
-    "folder",
-    "folders",
-    "directory",
-    "directories",
-    "document",
-    "documents",
-    "project",
-    "projects",
-    "misc",
-    "general",
-    "archive",
-    "code",
-    "python-code",
-    "web-code",
-    "frontend-code",
-    "backend-code",
-    "java-code",
-    "cpp-code",
-    "data-files",
-    "presentations",
-}
 
 HARD_IGNORE_DIRS = {
     ".git",
@@ -59,9 +35,58 @@ HARD_IGNORE_DIRS = {
     "venv",
     "dist",
     "build",
+    "target",
+    ".cache",
+    ".next",
+    ".nuxt",
     "$RECYCLE.BIN",
     "System Volume Information",
+    "Library",      # Unity Library
+    "Temp",         # Unity Temp
+    "Logs",         # Unity Logs
+    ".vs",
+    ".idea",
+    "obj",
+    "bin",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "coverage",
+    ".terraform",
+    ".gradle",
 }
+
+HARD_IGNORE_DIRS_LOWER = {d.lower() for d in HARD_IGNORE_DIRS}
+
+GENERIC_TAGS = frozenset({
+    "project",
+    "document",
+    "research",
+    "code",
+    "file",
+    "folder",
+    "misc",
+    "general",
+    "data",
+    "archive",
+    "files",
+    "folders",
+    "directories",
+    "documents",
+    "projects",
+})
+
+EVIDENCE_BUCKETS = (
+    "manifest",
+    "readme_or_index",
+    "office_pdf",
+    "recent",
+    "long_maintained",
+    "entrypoint_like",
+    "deep_representative",
+    "diversity",
+)
 
 MARKER_FILE_NAMES = {
     "README",
@@ -79,32 +104,41 @@ MARKER_FILE_NAMES = {
     "CMakeLists.txt",
 }
 
-TEXT_EVIDENCE_EXTENSIONS = {
-    ".md",
-    ".txt",
-    ".rst",
-    ".toml",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".ini",
-    ".cfg",
-    ".csv",
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
+ENTRYPOINT_NAMES = {
+    "main.py",
+    "app.py",
+    "server.py",
+    "index.js",
+    "index.ts",
+    "main.go",
+    "main.rs",
+    "Main.java",
+    "Program.cs",
+    "docker-compose.yml",
+    "Dockerfile",
+    "Makefile",
 }
 
-REPRESENTATIVE_DOC_EXTENSIONS = {
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".ppt",
-    ".pptx",
-    ".xls",
-    ".xlsx",
-    ".md",
-    ".txt",
+TEXT_EVIDENCE_EXTENSIONS = {
+    ".md", ".txt", ".rst", ".toml", ".json", ".yaml", ".yml",
+    ".ini", ".cfg", ".csv", ".py", ".js", ".ts", ".tsx", ".jsx",
+    ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs",
+    ".rb", ".php", ".sh", ".bat", ".ps1", ".lua", ".r",
 }
+
+OFFICE_PDF_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx",
+    ".xls", ".xlsx", ".odt", ".ods", ".odp",
+}
+
+REPRESENTATIVE_DOC_EXTENSIONS = OFFICE_PDF_EXTENSIONS | {".md", ".txt"}
+
+ANNOTATION_DECISIONS = {"annotate", "needs_more_evidence", "defer", "ignore_noise"}
+
+AREA_STATUSES = {
+    "unseen", "profiled", "needs_more_evidence",
+    "deferred", "ignored_noise", "covered", "out_of_scope",
+}
+
+ROUTE_STATUSES = {"active", "candidate", "deferred"}
+ROUTE_TIERS = {"active", "warm", "cold"}

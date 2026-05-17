@@ -1,4 +1,4 @@
-"""Route-tier maintenance for Local Semantic Overlay."""
+"""Route-tier maintenance for Local Semantic Overlay v2."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ def route_score(route: dict[str, Any]) -> float:
 
 def maintenance_tick() -> dict[str, Any]:
     """Rebalance route tiers opportunistically."""
-
     store.init_db()
     routes = store.list_routes()
     demoted: list[dict[str, str]] = []
@@ -66,8 +65,7 @@ def maintenance_tick() -> dict[str, Any]:
     routes = store.list_routes()
     if len(routes) > MAX_ROUTES:
         cold = sorted([r for r in routes if r["tier"] == "cold"], key=route_score)
-        overflow = len(routes) - MAX_ROUTES
-        for route in cold[:overflow]:
+        for route in cold[:len(routes) - MAX_ROUTES]:
             store.bump_route(route["route_id"], risk_delta=0.5)
             demoted.append({"route_id": route["route_id"], "from": "cold", "to": "cold", "reason": "route_cap_risk"})
 

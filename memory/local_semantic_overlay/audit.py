@@ -1,4 +1,4 @@
-"""Audits for Local Semantic Overlay."""
+"""Audits for Local Semantic Overlay v2."""
 
 from __future__ import annotations
 
@@ -6,12 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
-from .config import GENERIC_ROUTE_TAGS
-
-
-def _looks_like_file(path: str) -> bool:
-    suffix = Path(path).suffix
-    return bool(suffix and len(suffix) <= 10)
+from .config import GENERIC_TAGS, HARD_IGNORE_DIRS_LOWER
 
 
 def audit_lso() -> dict[str, Any]:
@@ -20,49 +15,49 @@ def audit_lso() -> dict[str, Any]:
     routes = store.list_routes()
 
     for route in routes:
-        anchors = store.list_anchors(route["route_id"])
-        evidence = store.list_evidence(route["route_id"], limit=5)
-        tags = {tag.lower() for tag in route.get("route_tags") or []}
-        generic = sorted(tags & GENERIC_ROUTE_TAGS)
-        if not anchors:
+        tags = {t.lower() for t in route.get("tags") or []}
+        generic = sorted(tags & GENERIC_TAGS)
+        ann_ids = route.get("supporting_annotation_ids") or []
+        entrypoints = route.get("entrypoints") or []
+        anchor = route.get("anchor_path")
+
+        if not ann_ids:
+            warnings.append({"kind": "route_missing_annotations", "route_id": route["route_id"], "title": route["title"]})
+        if not entrypoints:
+            warnings.append({"kind": "route_missing_entrypoints", "route_id": route["route_id"], "title": route["title"]})
+        if not anchor:
             warnings.append({"kind": "route_missing_anchor", "route_id": route["route_id"], "title": route["title"]})
-        if not evidence:
-            warnings.append({"kind": "route_missing_evidence", "route_id": route["route_id"], "title": route["title"]})
+        if anchor and Path(anchor).name.lower() in HARD_IGNORE_DIRS_LOWER:
+            warnings.append({"kind": "route_anchor_is_noise", "route_id": route["route_id"], "anchor": anchor})
         if generic:
-            warnings.append({"kind": "generic_or_file_type_route_tag", "route_id": route["route_id"], "tags": generic})
-        if len(anchors) == 1 and _looks_like_file(anchors[0]["path"]):
-            warnings.append({"kind": "leaf_like_route_anchor", "route_id": route["route_id"], "path": anchors[0]["path"]})
+            warnings.append({"kind": "generic_route_tag", "route_id": route["route_id"], "tags": generic})
         if route["tier"] == "active" and not route.get("last_used"):
-            warnings.append({"kind": "active_route_without_use", "route_id": route["route_id"], "title": route["title"]})
-        if route.get("usage_verification") == "predicted":
-            if route["tier"] == "active" or float(route.get("usage_score") or 0) > 0:
-                warnings.append({"kind": "predicted_route_has_usage_state", "route_id": route["route_id"], "title": route["title"]})
-            if not route.get("task_affordances"):
-                warnings.append({"kind": "predicted_route_missing_task_affordances", "route_id": route["route_id"], "title": route["title"]})
-            if not route.get("search_hints"):
-                warnings.append({"kind": "predicted_route_missing_search_hints", "route_id": route["route_id"], "title": route["title"]})
+            warnings.append({"kind": "active_without_use", "route_id": route["route_id"], "title": route["title"]})
 
-    draft_plans = store.list_update_plans(status="draft", limit=500)
-    if draft_plans:
-        warnings.append({"kind": "unresolved_update_plans", "count": len(draft_plans), "plan_ids": [plan["plan_id"] for plan in draft_plans[:10]]})
+        valid_anns = [store.get_annotation(aid) for aid in ann_ids]
+        valid_anns = [a for a in valid_anns if a]
+        orphaned = len(ann_ids) - len(valid_anns)
+        if orphaned > 0:
+            warnings.append({"kind": "route_orphaned_annotations", "route_id": route["route_id"], "orphaned": orphaned})
 
-    recall_events = store.list_events("recall", limit=500)
-    finish_events = store.list_events("finish_task", limit=500)
-    selected: set[str] = set()
-    for event in finish_events:
-        payload = event.get("payload") or {}
-        selected.update(payload.get("selected_routes") or [])
-    recalled: set[str] = set()
-    for event in recall_events:
-        recalled.update(event.get("route_ids") or [])
-    unconsumed = sorted(recalled - selected)
-    if unconsumed:
-        warnings.append({"kind": "recalled_routes_not_consumed", "count": len(unconsumed), "route_ids": unconsumed[:10]})
+    annotations = store.list_annotations(decision="annotate")
+    route_ann_ids: set[str] = set()
+    for r in routes:
+        route_ann_ids.update(r.get("supporting_annotation_ids") or [])
+    unlinked = [a for a in annotations if a["annotation_id"] not in route_ann_ids]
+    if unlinked:
+        warnings.append({"kind": "annotations_not_linked_to_routes", "count": len(unlinked),
+                          "sample": [a["annotation_id"] for a in unlinked[:10]]})
+
+    plans = store.list_update_plans(status="draft", limit=500)
+    if plans:
+        warnings.append({"kind": "unresolved_update_plans", "count": len(plans),
+                          "plan_ids": [p["plan_id"] for p in plans[:10]]})
 
     stats = store.all_query_stats()
-    negative_heavy = [item for item in stats if item["negative_count"] > item["positive_count"] and item["negative_count"] >= 2]
-    if negative_heavy:
-        warnings.append({"kind": "negative_query_feedback", "count": len(negative_heavy), "items": negative_heavy[:10]})
+    neg_heavy = [s for s in stats if s["negative_count"] > s["positive_count"] and s["negative_count"] >= 2]
+    if neg_heavy:
+        warnings.append({"kind": "negative_query_feedback", "count": len(neg_heavy), "items": neg_heavy[:10]})
 
     return {
         "ok": True,
