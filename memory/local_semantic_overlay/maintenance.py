@@ -18,8 +18,14 @@ def _parse_time(value: str | None) -> datetime | None:
         return None
 
 
-def _age_days(value: str | None) -> float:
+SEEDED_GRACE_DAYS = 14
+
+
+def _age_days(value: str | None, fallback: str | None = None) -> float:
+    """Days since the given timestamp. Falls back to fallback (e.g. created_at) instead of 9999."""
     parsed = _parse_time(value)
+    if not parsed:
+        parsed = _parse_time(fallback)
     if not parsed:
         return 9999.0
     return (datetime.now(timezone.utc) - parsed).total_seconds() / 86400
@@ -30,7 +36,7 @@ def route_score(route: dict[str, Any]) -> float:
     quality = float(route.get("quality_score") or 0)
     confidence = float(route.get("confidence") or 0)
     risk = float(route.get("risk_score") or 0)
-    stale_penalty = min(_age_days(route.get("last_used")) / 180, 2.0)
+    stale_penalty = min(_age_days(route.get("last_used"), route.get("created_at")) / 180, 2.0)
     return usage + quality + confidence - risk - stale_penalty
 
 
@@ -43,10 +49,17 @@ def maintenance_tick() -> dict[str, Any]:
 
     for route in routes:
         tier = route["tier"]
-        if tier == "active" and _age_days(route.get("last_used")) > ACTIVE_STALE_DAYS:
+        # fix10: seeded routes get a grace period before stale demotion
+        is_seeded = route.get("usage_verification") == "seeded"
+        created_age = _age_days(route.get("created_at"))
+        if is_seeded and created_age < SEEDED_GRACE_DAYS:
+            continue
+
+        age = _age_days(route.get("last_used"), route.get("created_at"))
+        if tier == "active" and age > ACTIVE_STALE_DAYS:
             store.set_route_tier(route["route_id"], "warm")
             demoted.append({"route_id": route["route_id"], "from": "active", "to": "warm", "reason": "stale_active"})
-        elif tier == "warm" and _age_days(route.get("last_used")) > WARM_STALE_DAYS and float(route.get("usage_score") or 0) <= 0:
+        elif tier == "warm" and age > WARM_STALE_DAYS and float(route.get("usage_score") or 0) <= 0:
             store.set_route_tier(route["route_id"], "cold")
             demoted.append({"route_id": route["route_id"], "from": "warm", "to": "cold", "reason": "stale_warm"})
 

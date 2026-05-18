@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import re
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,13 @@ from .config import (
 
 MAX_ENTRIES_PER_DIR = 500
 MAX_EVIDENCE_PER_AREA = 12
+DEEP_REPR_MAX_EXTRA_DEPTH = 2
+DEEP_REPR_MAX_FILES = 4
+
+_PATH_ONLY_TAG_RE = re.compile(
+    r"^[a-z]?[:\\/]|[\\/]{2,}|^[a-z]-[a-z]+-[a-z]+-[a-z]+$",
+    re.IGNORECASE,
+)
 
 
 def _is_hard_ignored(path: Path) -> bool:
@@ -80,6 +89,17 @@ def _stat_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _looks_path_only(tag: str) -> bool:
+    """Reject tags that are just path fragments or drive-letter derivatives."""
+    t = tag.strip()
+    if _PATH_ONLY_TAG_RE.search(t):
+        return True
+    parts = re.split(r"[-_/\\]", t)
+    if len(parts) >= 4 and all(len(p) <= 3 for p in parts):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +231,7 @@ def area_profile(session_id: str, area_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Representative Evidence Sampling
+# Phase 3: Representative Evidence Sampling  (fix2 + fix3)
 # ---------------------------------------------------------------------------
 
 def collect_area_evidence(
@@ -235,20 +255,53 @@ def collect_area_evidence(
 
     per_area = max(3, total_budget // max(1, len(non_noise)))
     total_collected: list[dict[str, Any]] = []
+    sampled_ids: set[str] = set()
+    skipped: list[dict[str, Any]] = []
 
     for area in non_noise:
         if len(total_collected) >= total_budget:
-            break
+            # fix2: explicitly mark skipped areas instead of silent break
+            store.update_area_status(area["area_id"], "needs_more_evidence")
+            skipped.append({"area_id": area["area_id"], "path": area["path"]})
+            continue
         collected = _sample_area_evidence(session_id, area, min(per_area, MAX_EVIDENCE_PER_AREA))
         total_collected.extend(collected)
+        sampled_ids.add(area["area_id"])
 
     return {
         "ok": True,
         "session_id": session_id,
         "evidence_count": len(total_collected),
-        "areas_sampled": len(non_noise),
+        "areas_sampled": len(sampled_ids),
+        "areas_skipped": len(skipped),
+        "skipped_areas": skipped[:50],
         "evidence_items": total_collected[:100],
     }
+
+
+def _collect_deep_files(
+    base: Path,
+    used: set[str],
+    max_depth: int = DEEP_REPR_MAX_EXTRA_DEPTH,
+    max_files: int = DEEP_REPR_MAX_FILES,
+) -> list[Path]:
+    """Recursively collect representative files from subdirectories."""
+    result: list[Path] = []
+    queue: list[tuple[Path, int]] = [(base, 0)]
+    while queue and len(result) < max_files:
+        current, depth = queue.pop(0)
+        if depth > max_depth:
+            continue
+        for entry in _safe_scandir(current)[:200]:
+            if len(result) >= max_files:
+                break
+            p = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False) and not _dir_is_noise(p.name):
+                queue.append((p, depth + 1))
+            elif entry.is_file(follow_symlinks=False) and str(p) not in used:
+                if _is_text(p) or _is_office_pdf(p):
+                    result.append(p)
+    return result
 
 
 def _sample_area_evidence(session_id: str, area: dict[str, Any], budget: int) -> list[dict[str, Any]]:
@@ -299,8 +352,9 @@ def _sample_area_evidence(session_id: str, area: dict[str, Any], budget: int) ->
     for f in by_mtime[:2]:
         _add(f, "recent", 1.2)
 
-    text_files = [f for f in files if _is_text(f)]
-    for f in text_files[:2]:
+    # fix3: deep_representative actually recurses into subdirectories
+    deep_files = _collect_deep_files(path, used_paths)
+    for f in deep_files:
         _add(f, "deep_representative", 1.0)
 
     remaining = [f for f in files if str(f) not in used_paths]
@@ -344,21 +398,99 @@ def expand_area_evidence(session_id: str, area_id: str, budget: str = "normal") 
     return {"ok": True, "area": area, "evidence_items": evidence, "evidence_count": len(evidence)}
 
 
+# fix4: real Office/PDF extraction
 def _try_office_extract(path: Path) -> str | None:
-    """Best-effort text extraction from Office/PDF. Returns None on failure."""
+    """Extract text from Office/PDF files using real parsers, not raw byte decode."""
+    suffix = path.suffix.lower()
     try:
-        data = path.read_bytes()[:8000]
-        for enc in ("utf-8", "utf-8-sig", "gbk", "latin-1"):
-            try:
-                text = data.decode(enc)
-                printable = "".join(ch for ch in text if ch.isprintable() or ch in "\n\r\t")
-                if len(printable) > 50:
-                    return printable[:DEFAULT_TEXT_HEAD_CHARS]
-            except UnicodeDecodeError:
-                continue
+        if suffix == ".docx":
+            return _extract_docx(path)
+        if suffix in (".pptx", ".xlsx"):
+            return _extract_ooxml_shared_strings(path)
+        if suffix == ".pdf":
+            return _extract_pdf_best_effort(path)
+        if suffix in (".doc", ".ppt", ".xls"):
+            return _extract_legacy_office_strings(path)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_docx(path: Path) -> str | None:
+    """Extract text from docx by parsing word/document.xml inside the zip."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            if "word/document.xml" not in zf.namelist():
+                return None
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        texts = [node.text for node in root.iter(f"{{{ns['w']}}}t") if node.text]
+        content = " ".join(texts).strip()
+        return content[:DEFAULT_TEXT_HEAD_CHARS] if len(content) > 30 else None
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
+        return None
+
+
+def _extract_ooxml_shared_strings(path: Path) -> str | None:
+    """Extract text from pptx/xlsx by scanning all xml parts for text nodes."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            texts: list[str] = []
+            for name in zf.namelist():
+                if name.endswith(".xml") and len(texts) < 500:
+                    try:
+                        root = ET.fromstring(zf.read(name))
+                        for elem in root.iter():
+                            if elem.text and elem.text.strip():
+                                texts.append(elem.text.strip())
+                    except ET.ParseError:
+                        continue
+        content = " ".join(texts).strip()
+        return content[:DEFAULT_TEXT_HEAD_CHARS] if len(content) > 30 else None
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+
+def _extract_pdf_best_effort(path: Path) -> str | None:
+    """Try pdfplumber, fall back to regex on raw bytes."""
+    try:
+        import pdfplumber  # type: ignore
+        with pdfplumber.open(path) as pdf:
+            texts = []
+            for page in pdf.pages[:5]:
+                t = page.extract_text()
+                if t:
+                    texts.append(t)
+            content = "\n".join(texts).strip()
+            return content[:DEFAULT_TEXT_HEAD_CHARS] if len(content) > 30 else None
+    except Exception:
+        pass
+    # Fallback: extract printable ASCII/UTF-8 strings from raw bytes
+    try:
+        data = path.read_bytes()[:32000]
+        strings = re.findall(rb"[\x20-\x7e\xc0-\xff]{8,}", data)
+        if strings:
+            text = b" ".join(strings[:200]).decode("utf-8", errors="replace")
+            return text[:DEFAULT_TEXT_HEAD_CHARS] if len(text) > 50 else None
     except OSError:
         pass
     return None
+
+
+def _extract_legacy_office_strings(path: Path) -> str | None:
+    """Best-effort extraction from legacy .doc/.xls/.ppt via printable strings."""
+    try:
+        data = path.read_bytes()[:32000]
+        # Extract runs of printable chars (legacy Office embeds text in binary)
+        strings = re.findall(rb"[\x20-\x7e]{10,}", data)
+        unicode_strings = re.findall(rb"(?:[\x20-\x7e]\x00){5,}", data)
+        texts = [s.decode("ascii", errors="replace") for s in strings[:100]]
+        texts.extend(s.decode("utf-16-le", errors="replace") for s in unicode_strings[:50])
+        content = " ".join(texts).strip()
+        return content[:DEFAULT_TEXT_HEAD_CHARS] if len(content) > 50 else None
+    except OSError:
+        return None
 
 
 def next_seed_packet(session_id: str, packet_size: int = DEFAULT_PACKET_SIZE) -> dict[str, Any]:
@@ -403,7 +535,7 @@ def next_seed_packet(session_id: str, packet_size: int = DEFAULT_PACKET_SIZE) ->
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: File-Level Annotation
+# Phase 4: File-Level Annotation  (fix5)
 # ---------------------------------------------------------------------------
 
 def file_annotation_schema() -> dict[str, Any]:
@@ -450,17 +582,31 @@ def apply_file_annotations(session_id: str, annotations: list[dict[str, Any]]) -
             errors.append({"error": "evidence not found", "evidence_id": evidence_id})
             continue
 
+        # fix5a: verify evidence belongs to current session
+        if ev.get("session_id") != session_id:
+            errors.append({"error": "evidence does not belong to this session", "evidence_id": evidence_id})
+            continue
+
         tags = raw.get("tags") or []
         if decision == "annotate":
             if not tags:
                 errors.append({"error": "annotate requires tags", "evidence_id": evidence_id})
                 continue
-            bad_tags = [t for t in tags if t.lower() in GENERIC_TAGS]
-            if bad_tags:
-                errors.append({"error": f"generic tags not allowed: {bad_tags}", "evidence_id": evidence_id})
+            bad_generic = [t for t in tags if t.lower() in GENERIC_TAGS]
+            if bad_generic:
+                errors.append({"error": f"generic tags not allowed: {bad_generic}", "evidence_id": evidence_id})
+                continue
+            # fix5c: reject path-only tags
+            bad_path = [t for t in tags if _looks_path_only(t)]
+            if bad_path:
+                errors.append({"error": f"path-only tags not allowed: {bad_path}", "evidence_id": evidence_id})
                 continue
             if not raw.get("value_reason"):
                 errors.append({"error": "annotate requires value_reason", "evidence_id": evidence_id})
+                continue
+            # fix5b: require evidence_summary
+            if not raw.get("evidence_summary"):
+                errors.append({"error": "annotate requires evidence_summary", "evidence_id": evidence_id})
                 continue
 
         ann = store.create_annotation(
@@ -479,7 +625,7 @@ def apply_file_annotations(session_id: str, annotations: list[dict[str, Any]]) -
         if decision == "needs_more_evidence":
             store.update_area_status(ev["area_id"], "needs_more_evidence")
         elif decision == "ignore_noise":
-            pass  # area status stays; individual evidence is marked
+            pass
         elif decision == "annotate":
             area = store.get_area(ev["area_id"])
             if area and area["status"] not in ("covered",):
@@ -500,7 +646,7 @@ def list_file_annotations(
     area_id: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    decision = status  # alias
+    decision = status
     anns = store.list_annotations(session_id=session_id, area_id=area_id, decision=decision, limit=limit)
     return {"ok": True, "annotations": anns, "count": len(anns)}
 
@@ -584,8 +730,40 @@ def _path_under(path: str, scope: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5: Route Lift And Overview
+# Phase 5: Route Lift And Overview  (fix6 + fix7)
 # ---------------------------------------------------------------------------
+
+def _tag_overlap(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _cluster_annotations_by_tags(anns: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Sub-cluster annotations within an area by tag similarity (Jaccard >= 0.2)."""
+    if len(anns) <= 3:
+        return [anns]
+
+    clusters: list[list[dict[str, Any]]] = []
+    assigned: set[str] = set()
+
+    for ann in anns:
+        if ann["annotation_id"] in assigned:
+            continue
+        cluster = [ann]
+        assigned.add(ann["annotation_id"])
+        ann_tags = {t.lower() for t in ann.get("tags") or []}
+        for other in anns:
+            if other["annotation_id"] in assigned:
+                continue
+            other_tags = {t.lower() for t in other.get("tags") or []}
+            if _tag_overlap(ann_tags, other_tags) >= 0.2:
+                cluster.append(other)
+                assigned.add(other["annotation_id"])
+        clusters.append(cluster)
+
+    return clusters
+
 
 def propose_route_nodes(session_id: str, limit: int | None = None) -> dict[str, Any]:
     """Generate route proposals from annotated evidence. Does NOT create routes."""
@@ -605,22 +783,29 @@ def propose_route_nodes(session_id: str, limit: int | None = None) -> dict[str, 
         by_area.setdefault(aid, []).append(ann)
 
     proposals: list[dict[str, Any]] = []
-    for area_id, anns in by_area.items():
+    for area_id, area_anns in by_area.items():
         if len(proposals) >= budget:
             break
         area = store.get_area(area_id)
         if not area:
             continue
 
-        prop = store.create_proposal(
-            session_id=session_id,
-            title=f"[proposal] {Path(area['path']).name}",
-            brief=f"Route proposal from {len(anns)} annotations in {area['path']}",
-            supporting_annotation_ids=[a["annotation_id"] for a in anns],
-            anchor_path=area["path"],
-            tags=_merge_tags(anns),
-        )
-        proposals.append(prop)
+        # fix6: sub-cluster within area by tag similarity
+        clusters = _cluster_annotations_by_tags(area_anns)
+        for cluster in clusters:
+            if len(proposals) >= budget:
+                break
+            merged = _merge_tags(cluster)
+            suffix = f" ({merged[0]})" if merged else ""
+            prop = store.create_proposal(
+                session_id=session_id,
+                title=f"[proposal] {Path(area['path']).name}{suffix}",
+                brief=f"Route proposal from {len(cluster)} annotations in {area['path']}",
+                supporting_annotation_ids=[a["annotation_id"] for a in cluster],
+                anchor_path=area["path"],
+                tags=merged,
+            )
+            proposals.append(prop)
 
     return {
         "ok": True,
@@ -648,9 +833,9 @@ def route_card_schema() -> dict[str, Any]:
             "brief": "str - what this route lets the Agent do",
             "use_when": "str - when to use this route",
             "anchor_path": "str - root directory",
-            "entrypoints": "list[str] - key file paths",
+            "entrypoints": "list[str] - key file paths (must be under or near anchor_path)",
             "supporting_annotation_ids": "list[str] - annotation ids backing this route",
-            "tags": "list[str] - evidence-backed semantic tags (no generic tags)",
+            "tags": "list[str] - must be subset of tags from supporting annotations",
         },
         "optional_fields": {
             "route_terms": "list[str] - search cue terms",
@@ -659,7 +844,8 @@ def route_card_schema() -> dict[str, Any]:
         },
         "rules": [
             "anchor must not be a tech noise directory",
-            "tags must come from annotation evidence, not inferred from paths",
+            "tags must come from supporting annotation tags, not invented",
+            "entrypoints must be under anchor_path or under evidence paths",
             "route_budget is an upper limit, not a target",
             "low-confidence routes go to candidate/deferred, not active",
         ],
@@ -710,6 +896,15 @@ def apply_route_cards(session_id: str, route_cards: list[dict[str, Any]]) -> dic
             errors.append({"error": "no valid supporting annotations", "title": title})
             continue
 
+        # fix7a: verify route tags are subset of annotation evidence tags
+        ann_tag_pool = set()
+        for a in valid_anns:
+            ann_tag_pool.update(t.lower() for t in (a.get("tags") or []))
+        unsupported_tags = [t for t in tags if t.lower() not in ann_tag_pool and t.lower() not in GENERIC_TAGS]
+        if unsupported_tags:
+            errors.append({"error": f"tags not found in supporting annotations: {unsupported_tags}", "title": title})
+            continue
+
         bad_tags = [t for t in tags if t.lower() in GENERIC_TAGS]
         if bad_tags:
             errors.append({"error": f"generic tags not allowed: {bad_tags}", "title": title})
@@ -718,6 +913,21 @@ def apply_route_cards(session_id: str, route_cards: list[dict[str, Any]]) -> dic
         if anchor and _dir_is_noise(Path(anchor).name):
             errors.append({"error": "anchor cannot be tech noise directory", "title": title, "anchor": anchor})
             continue
+
+        # fix7b: verify entrypoints are under anchor or under evidence paths
+        if anchor:
+            ann_paths = {store.normalize_path(a["path"]) for a in valid_anns if a.get("path")}
+            anchor_norm = store.normalize_path(anchor)
+            bad_eps = []
+            for ep in entrypoints:
+                ep_norm = store.normalize_path(ep)
+                under_anchor = _path_under(ep_norm, anchor_norm)
+                near_evidence = any(_path_under(ep_norm, str(Path(p).parent)) for p in ann_paths)
+                if not under_anchor and not near_evidence:
+                    bad_eps.append(ep)
+            if bad_eps:
+                errors.append({"error": f"entrypoints not under anchor or evidence: {bad_eps}", "title": title})
+                continue
 
         confidence = float(card.get("confidence", 0.6))
         tier = "warm"
@@ -764,6 +974,17 @@ def list_route_proposals(session_id: str, status: str | None = None) -> dict[str
     return {"ok": True, "proposals": proposals, "count": len(proposals)}
 
 
+# fix1: runtime coverage uses structural completeness, not search("test")
+def _annotation_runtime_ready(ann: dict[str, Any]) -> bool:
+    """An annotation is runtime-queryable if it has tags + value_reason + evidence_summary."""
+    return bool(
+        ann.get("decision") == "annotate"
+        and ann.get("tags")
+        and ann.get("value_reason")
+        and ann.get("evidence_summary")
+    )
+
+
 def finish_seed_map(session_id: str) -> dict[str, Any]:
     """Hard validator. Returns success/incomplete/failed with detailed metrics."""
     session = store.get_seed_session(session_id)
@@ -788,8 +1009,9 @@ def finish_seed_map(session_id: str) -> dict[str, Any]:
     covered_hv = [e for e in high_value_ev if e["evidence_id"] in annotated_ev_ids]
     hv_coverage = len(covered_hv) / max(1, len(high_value_ev))
 
-    ann_queryable = len(search_file_annotations("test", limit=1000)) if annotate_anns else 0
-    runtime_coverage = min(1.0, ann_queryable / max(1, len(annotate_anns)))
+    # fix1: structural completeness instead of search("test")
+    queryable_anns = [a for a in annotate_anns if _annotation_runtime_ready(a)]
+    runtime_coverage = len(queryable_anns) / max(1, len(annotate_anns))
 
     route_quality_failures: list[dict[str, Any]] = []
     for r in routes:
@@ -808,8 +1030,9 @@ def finish_seed_map(session_id: str) -> dict[str, Any]:
     active_route_quality = 1.0 - (len(route_quality_failures) / max(1, len(routes))) if routes else 0.0
 
     runtime_readiness_failures: list[str] = []
-    if annotate_anns and ann_queryable == 0:
-        runtime_readiness_failures.append("annotations exist but none queryable at runtime")
+    non_queryable = len(annotate_anns) - len(queryable_anns)
+    if non_queryable > 0:
+        runtime_readiness_failures.append(f"{non_queryable} annotations missing tags/value_reason/evidence_summary")
     for r in routes:
         if not r.get("supporting_annotation_ids"):
             runtime_readiness_failures.append(f"route {r['route_id']} has no annotation backing")
@@ -865,11 +1088,10 @@ def seed_map_report(session_id: str) -> dict[str, Any]:
     session = store.get_seed_session(session_id)
     if not session:
         return {"ok": False, "error": "session not found"}
-    return finish_seed_map.__wrapped__(session_id) if hasattr(finish_seed_map, "__wrapped__") else _compute_report(session_id)
+    return _compute_report(session_id)
 
 
 def _compute_report(session_id: str) -> dict[str, Any]:
-    """Same logic as finish_seed_map but doesn't persist status."""
     areas = store.list_areas(session_id)
     annotations = store.list_annotations(session_id=session_id)
     evidence = store.list_evidence_items(session_id=session_id)

@@ -163,6 +163,10 @@ def recall_routes(query: str | None = None, scope: str | None = None, limit: int
     q = (query or kwargs.get("task_intent") or kwargs.get("q") or "").strip()
     scored: list[tuple[float, dict[str, Any], list[str]]] = []
     for route in store.list_routes():
+        # fix8: filter routes by scope when provided
+        if scope and route.get("anchor_path"):
+            if not _is_under(route["anchor_path"], scope) and not _is_under(scope, route["anchor_path"]):
+                continue
         s, why = _score_route(route, q)
         if s > 0:
             scored.append((s, route, why))
@@ -206,9 +210,8 @@ def run_file_query(query: str, scope: str | None = None, limit: int = DEFAULT_RE
         h["score"] = round(10.0 - i * 0.5, 3)
     ann_hits = [h for h in ann_hits if h["score"] > 2]
 
-    deferred = store.list_deferred(status="pending", limit=limit)
-    deferred_hits = [{"deferred_id": d["deferred_id"], "kind": d["kind"], "reason": d["reason"],
-                      "hit_type": "deferred"} for d in deferred[:5]]
+    # fix9: deferred_hits with query scoring and scope filter
+    deferred_hits = _score_deferred(query, scope=scope, limit=5)
 
     search_hits: list[dict[str, Any]] = []
     fallback_used = False
@@ -420,6 +423,31 @@ def _is_under(path: str, anchor: str) -> bool:
         return Path(path).resolve() == Path(anchor).resolve() or Path(anchor).resolve() in Path(path).resolve().parents
     except OSError:
         return path.lower().startswith(anchor.rstrip("\\/").lower() + os.sep.lower())
+
+
+def _score_deferred(query: str, scope: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
+    """Score deferred items against the query instead of returning them blindly."""
+    raw = store.list_deferred(status="pending", limit=200)
+    if not raw:
+        return []
+    query_tokens = _tokens(query)
+    query_lc = query.lower()
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for d in raw:
+        reason_lc = (d.get("reason") or "").lower()
+        reason_tokens = _tokens(reason_lc)
+        overlap = query_tokens & reason_tokens
+        s = len(overlap) * 2.0
+        for cue in query_tokens:
+            if len(cue) >= 2 and cue in reason_lc:
+                s += 1.5
+        if s <= 0:
+            continue
+        hit = {"deferred_id": d["deferred_id"], "kind": d["kind"], "reason": d["reason"],
+               "hit_type": "deferred", "score": round(s, 3)}
+        scored.append((s, hit))
+    scored.sort(key=lambda x: -x[0])
+    return [h for _, h in scored[:limit]]
 
 
 def update_route_tags(
