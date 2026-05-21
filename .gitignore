@@ -44,6 +44,12 @@ memory/*
 !memory/autonomous_operation_sop/**
 !memory/scheduled_task_sop.md
 
+# LSO Slim (package tracked; per-scope overlay JSON stays local)
+!memory/local_semantic_overlay.md
+!memory/local_semantic_overlay/
+!memory/local_semantic_overlay/**
+memory/local_semantic_overlay/overlays/*
+
 # L4 session archiver (only the script, not archives)
 !memory/L4_raw_sessions/
 memory/L4_raw_sessions/*
