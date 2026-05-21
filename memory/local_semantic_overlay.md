@@ -1,173 +1,163 @@
-# Local Semantic Overlay SOP (v2 — Area-Aware Annotation-First)
+# Local Semantic Overlay SOP (v3 — Readable-Evidence-Bounded)
 
-Local Semantic Overlay (LSO) is a semantic overlay above the local filesystem
-and Everything/es. It is not a file-level index, not a batch builder, and not an
-Agent hook. Use it only through explicit calls.
+LSO is a **semantic map layer** over the filesystem and Everything/es. It is not a search engine, not a cold-start builder, and not a route generator.
 
-## Import
+## Runtime (code_run)
+
+`code_run` prepends `memory/` to `sys.path` via `assets/code_run_header.py`. Use **only**:
 
 ```python
-from local_semantic_overlay import *
+from local_semantic_overlay import (...)
 ```
 
-Do not import internal modules unless debugging.
+Do **not** use `from memory.local_semantic_overlay import ...`, do **not** probe `sys.path` or `memory/__init__.py`.
 
-## Cold-Start Flow
+*(Local pytest from repo root may use `memory.local_semantic_overlay` — that path is for tests only.)*
 
-Cold start builds an area-aware, annotation-first semantic overview.
-
-```python
-session = begin_seed_map(scope="F:\\", route_budget=40)
-session_id = session["session_id"]
-
-survey_scope(session_id)
-
-collect_area_evidence(session_id)
-
-packet = next_seed_packet(session_id, packet_size=6)
-
-apply_file_annotations(session_id, annotations=[
-    {
-        "evidence_id": "ev_xxx",
-        "decision": "annotate",
-        "tags": ["machine-learning", "pytorch-training"],
-        "value_reason": "Core ML training scripts",
-        "evidence_summary": "Contains model training and evaluation code",
-        "confidence": 0.8,
-    },
-    {
-        "evidence_id": "ev_yyy",
-        "decision": "defer",
-    },
-])
-
-propose_route_nodes(session_id)
-
-apply_route_cards(session_id, route_cards=[
-    {
-        "title": "Machine Learning Workspace",
-        "brief": "PyTorch training and evaluation code",
-        "use_when": "Tasks involving ML model training, evaluation, or data prep",
-        "anchor_path": "F:\\Projects\\ml-workspace",
-        "entrypoints": ["F:\\Projects\\ml-workspace\\train.py"],
-        "supporting_annotation_ids": ["ann_xxx"],
-        "tags": ["machine-learning", "pytorch-training"],
-        "route_terms": ["pytorch", "训练", "模型"],
-        "route_meta": {
-            "positive_cues": ["pytorch", "training", "模型"],
-            "negative_cues": ["unity", "游戏"],
-            "boundary_note": "Only ML code, not data storage",
-        },
-    },
-])
-
-report = finish_seed_map(session_id)
-overview = system_overview()
-```
-
-### Cold-Start Rules
-
-- `survey_scope()` creates an area ledger; every scanned directory has a status.
-- `collect_area_evidence()` samples per-area, not global top-N.
-- `apply_file_annotations()` is how the LLM judges file-level value.
-  Annotations are first-class runtime assets even without routes.
-- Routes are lifted from annotations only, via `apply_route_cards()`.
-- `finish_seed_map()` is a hard validator:
-  - `status="incomplete"` means gaps exist — not a success.
-  - `status="failed"` means no usable overlay was built.
-  - `next_required_actions` lists what must be done.
-- `route_budget` is an upper limit, not a target.
-
-### Annotation Schema
-
-`apply_file_annotations()` accepts aliases:
-- `file_id` / `candidate_id` → `evidence_id`
-- `action` → `decision`
-
-Decisions: `annotate`, `needs_more_evidence`, `defer`, `ignore_noise`.
-
-Tag rules: no path-only tags, no generic tags
-(`project/document/research/code/file/folder/misc/general`).
-
-## Runtime Flow
+## Import (explicit)
 
 ```python
-res = run_file_query(query, scope=optional_scope, limit=20)
-
-# Inspect layers separately:
-# res["route_hits"]           — semantic routes
-# res["file_annotation_hits"] — file annotations
-# res["deferred_hits"]        — pending items
-# res["search_hits"]          — Everything/es fallback
-
-finish_file_query(
-    res,
-    used=[...],
-    found=[...],
-    rejected=[...],
-    selected_routes=[...],
-    selected_annotations=[...],
+from local_semantic_overlay import (
+    begin_ingestion,
+    discover_leaf_seeds,
+    compress_directories_from_key_evidence,
+    mark_compress_done,
+    next_evidence_bundle,
+    apply_bundle_annotations,
+    apply_session_leaf_tags,
+    aggregate_directory_tags,
+    build_overview,
+    finish_ingestion,
+    audit_phase_a,
+    run_file_query,
+    finish_file_query,
+    system_overview,
 )
 ```
 
-### Runtime Rules
+## Phase A workflow (evidence bundle)
 
-- `finish_file_query()` or `finish_local_file_task()` is required for learning.
-  Recall alone does not warm routes or create update plans.
-- File annotations are queryable without routes.
-- `search_files_rows` / `search_files_paths` are thin Everything/es wrappers:
-  no semantic expansion, no rerank, no tag inference.
-- Fallback does not masquerade as a route hit.
-- `recommended_next_action` suggests: `use_route`, `inspect_annotation`,
-  `fallback_search`, or `ask_user`.
-
-## Recall Layers
-
-1. **Route recall** — semantic routes with cue/tag/term matching.
-2. **File annotation recall** — first-class annotation assets.
-3. **Deferred evidence** — items awaiting annotation or lift.
-4. **Everything/es fallback** — raw terrain, factual but uncompressed.
-
-## Route Semantics
-
-- Routes are only created from evidence-backed annotations.
-- Active routes require: `supporting_annotation_ids`, `entrypoints`,
-  `anchor_path`, `brief`, `use_when`, evidence-backed tags.
-- Seeded routes default to `usage_verification="seeded"`, `tier="warm"`.
-- Low-confidence routes go to `candidate` or `deferred`, not `active`.
-- `route_budget` is always an upper limit.
-
-## Search Substrate
+Default budgets: `candidate_leaf_budget=200`, `annotation_budget=30`, `bundle_budget=6`.
+Partial coverage is expected when budgets are finite — see `agent_report` / `cost_metrics`, not `finish_ingestion` status alone.
 
 ```python
-search_files_rows(query, scope=None, limit=50)   # -> list[dict]
-search_files_paths(query, scope=None, limit=50)   # -> list[str]
-search_files_detailed(query, scope=None, limit=50) # -> dict
-last_search_diagnostic()                           # -> dict
+beg = begin_ingestion(
+    scope=r"F:\YourScope",
+    candidate_leaf_budget=200,
+    annotation_budget=30,
+    bundle_budget=6,
+)
+sid = beg["session_id"]
+
+discover_leaf_seeds(sid)
+compress_directories_from_key_evidence(sid)
+mark_compress_done(sid)
+
+while True:
+    out = next_evidence_bundle(sid)
+    b = out.get("bundle")
+    if not b:
+        break
+    # LLM returns structured JSON per bundle_annotation_schema()
+    apply_bundle_annotations(b["bundle_id"], {...}, session_id=sid)
+
+aggregate_directory_tags(sid)
+build_overview(sid)
+
+report = finish_ingestion(sid)
+
+# REQUIRED — status is flow-only; coverage is in diagnostics
+print(report["agent_report"])
+print(report["diagnostics_summary"])
+print(report.get("cost_metrics"))
+
+audit = audit_phase_a()  # structural only
 ```
 
-`ensure_search_ready(start=True, patch=True)` may locate or start Everything/es.
-It must not write semantic overlay content into global memory.
+**Evidence bundle rules:**
 
-## Maintenance
+- Bundle is **ingestion-time scheduling only** — not a runtime semantic asset.
+- **Seed-first**: same global pending pool and sort as `next_tagging_packet` (`readable` + `seed` + no `leaf_tag_edges`, session-scoped); `primary_leaf` = queue head; `anchor_directory` = its parent; key evidence + same-anchor pending candidates add LLM context only.
+- `anchor_directory` is for **positioning only** — never tag/evidence from directory names.
+- Each tag needs **leaf-specific `evidence_note`** from that leaf's `text_head` / `evidence_title`.
+- Use `defer_leaf_ids` for uncertainty; **primary must be tagged (non-empty tags) or deferred** each `apply_bundle_annotations` call.
+- `compression_basis` supplements directory `org_signals` — does **not** replace `leaf_tag_edges`.
+- No bulk heuristic tagger; `apply_bundle_annotations` respects `annotation_budget` and bulk gate (12).
+- While an ingestion session is **open**, `apply_leaf_tags()` without `session_id` is rejected for any leaf in that session unless `source` is `bundle` (internal). Use `apply_bundle_annotations` or `apply_session_leaf_tags(session_id, ...)`.
+- Bundle payload caps: `DEFAULT_BUNDLE_KEY_EVIDENCE_CAP`, `DEFAULT_BUNDLE_CANDIDATE_CAP`, `DEFAULT_BUNDLE_TEXT_HEAD_CHARS`; `apply_bundle_annotations` rejects leaf ids outside the registered bundle set.
+- Default standard flow stops when `bundle_budget` is exhausted: aggregate, build overview, finish, and report blind spots. Do not spend remaining `annotation_budget` on tail packets unless the user explicitly asks for deep/tail expansion.
 
-Tiers: `active` → `warm` → `cold`. `maintenance_tick()` rebalances
-opportunistically. Annotations are never demoted; routes are.
+### Explicit deep/tail leaf packet loop
 
-## Audits
+Use only when the user explicitly asks to continue beyond the standard bundle budget. Same pending pool as bundle; apply through `apply_session_leaf_tags()` so tail work consumes the same `annotation_budget`.
 
-- `audit_lso()` — route/annotation health.
-- `audit_runtime()` — workflow drift (unfinalised recalls, unclosed feedback).
+```python
+from local_semantic_overlay import next_tagging_packet, apply_session_leaf_tags
 
-Important warnings:
-- Route missing annotations or entrypoints
-- Route anchor is tech noise
-- Generic route tags
-- Annotations not linked to routes
-- Recall not finalized
-- Fallback found paths without update plan
+pkt = next_tagging_packet(limit=6, session_id=sid, mode="tail")
+apply_session_leaf_tags(sid, [...])  # per leaf_tag_schema(); budget-accounted
+```
 
-## Out Of Scope
+### Optional: `run_ingestion_step(sid)`
 
-LSO does not implement batch indexing, watchers, file-read hooks, or changes to
-the Agent main loop.
+Returns **suggested** `next_action` only — does not run discover/compress/aggregate/LLM.
+Uses `preview_next_evidence_bundle` (no register, no session state write). **Register** (+ stale pending hygiene) only via `next_evidence_bundle(sid)`.
+
+## Runtime query
+
+```python
+result = run_file_query("pytorch training", scope=r"F:\YourScope")
+
+finish_file_query(
+    result,
+    used=[r"F:\YourScope\path\used.py"],
+    found=[r"F:\YourScope\path\discovered.py"],
+    rejected=[],
+)
+
+ov = system_overview(max_chars=2000)
+print(ov["overview"])
+print(ov["partial_map_warning"])
+print(ov["macro_coverage_note"])
+print(ov["coverage_basis"])
+```
+
+## Rules
+
+- Only **readable** leaves get semantic tags (`text_head` + `evidence_note`).
+- Overview titles use `evidence_title` rules — not directory names, not raw dumps.
+- No generic tags (`document`, `file`, `code`, `pdf`, …).
+- Seed sources: `recent`, `long_maintained`, `key_evidence`, `user_confirmed`, `fallback_found` only.
+- **No bulk heuristic tagger scripts.**
+- `apply_leaf_tags` / `apply_bundle_annotations` reject batches > 12 leaves per call.
+
+### Pitfalls (verified)
+
+- **All `allowed_leaf_ids` must be resolved**: every leaf in `allowed_leaf_ids` must appear in either `leaf_annotations` or `defer_leaf_ids`, otherwise `ok: false`.
+- **Already-tagged leaves cannot be deferred**: if a leaf was tagged in a prior bundle, including it in `defer_leaf_ids` returns `not_pending_tag_target`. Exclude them.
+- **Tags must not derive from filename/path/extension**: e.g. using the document filename as a tag triggers `tag derived from path/filename/extension` rejection. Use semantic/content-based tags.
+- **`evidence_note` must be detailed**: short generic notes (< ~30 chars) fail with `evidence_note too short`. Write a sentence describing the leaf's actual content.
+
+## Macro semantics
+
+- **Key-evidence compression role** = `org_signals.compression_role == "key_evidence_macro"` + `key_evidence_leaf_ids`.
+- `node_type` may be `semantic_node` while compression role is present — see `macro_nodes` with real `node_type`.
+- Bundle vs macro: macro = rule-side directory compression; bundle = LLM input scheduling for leaf tags.
+
+## Design Constraints
+
+- Current overview rebuild is single-session/single-active-DB oriented: `build_overview(session_id)` filters which nodes it rebuilds, but overview storage is still globally cleared before writing. Multi-session or old-DB reuse requires changing overview write strategy first, either session-scoped incremental writes or scoped delete. Do not treat this as already supported behavior.
+
+## Module boundaries
+
+| Module | Role |
+|--------|------|
+| `evidence_bundle` | `next_evidence_bundle`, `apply_bundle_annotations` (ingestion-time only) |
+| `evidence_title` | Rule-based titles |
+| `diagnostics` | diagnostics, `cost_metrics`, `format_agent_report` |
+| `leaf_seed` | seed discovery |
+| `directory_macro` | key-evidence compression |
+| `overview_build` | overview_entries |
+| `ingestion` | orchestration, budgets, `run_ingestion_step` hint |
+| `runtime` | query + `system_overview` |
+| `leaf_tagging` | tags + validation; `next_tagging_packet` shares pending pool with bundle; `apply_session_leaf_tags` is the budget-accounted tail apply path |

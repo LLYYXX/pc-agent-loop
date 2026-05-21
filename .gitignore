@@ -36,6 +36,12 @@ tasks/
 
 memory/*
 !memory/memory_management_sop.md
+!memory/local_semantic_overlay/
+!memory/local_semantic_overlay/**
+memory/local_semantic_overlay/*.sqlite
+memory/local_semantic_overlay/*.sqlite-*
+memory/local_semantic_overlay/__pycache__/
+memory/local_semantic_overlay/__pycache__/**
 
 # Allow tracking of specific SOPs
 !memory/web_setup_sop.md

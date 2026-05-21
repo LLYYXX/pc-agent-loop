@@ -1,537 +1,409 @@
-"""Runtime APIs for Local Semantic Overlay v2 (Area-Aware Annotation-First).
-
-Recall order: route -> file annotation -> deferred evidence -> Everything/es fallback.
-"""
+"""Query graph and fallback es only. No graph weight mutation."""
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any
 
 from . import store
-from .cold_start import search_file_annotations
-from .config import DEFAULT_EVIDENCE_LIMIT, DEFAULT_RECALL_LIMIT, GENERIC_TAGS
-from .maintenance import maintenance_tick, route_score
+from .config import DEFAULT_RECALL_LIMIT, GENERIC_TAGS
+from .diagnostics import build_ingestion_diagnostics
+from .directory_macro import build_macro_node_reports, node_has_key_evidence_compression
+from .evidence_title import sanitize_display_text
 from .search_substrate import search_files_rows
 
 GENERIC_QUERY_TERMS = {
-    "file", "files", "folder", "folders", "directory", "directories",
-    "document", "documents", "project", "projects", "misc", "general",
-    "archive", "code", "data",
-    "文件", "目录", "文件夹", "项目", "文档", "资料", "材料", "集合", "本机", "所有",
+    "file", "files", "folder", "folders", "document", "documents", "project", "projects",
+    "misc", "general", "code", "data", "文件", "目录", "项目", "文档",
 }
 
 
 def _tokens(text: str) -> set[str]:
     lowered = text.lower()
-    tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]{1,}", lowered))
-    tokens.update(re.findall(r"[\u4e00-\u9fff]{2,}", lowered))
-    return {t for t in tokens if t not in GENERIC_QUERY_TERMS}
+    toks = set(re.findall(r"[a-z0-9][a-z0-9_-]{1,}", lowered))
+    toks.update(re.findall(r"[\u4e00-\u9fff]{2,}", lowered))
+    return {t for t in toks if t not in GENERIC_QUERY_TERMS and t not in GENERIC_TAGS}
 
 
-def _cue_matches(cue: str, query_tokens: set[str], query_lc: str) -> bool:
-    """Check if a cue term matches the query. Respects Chinese 2-char minimum and exact-token for short terms."""
-    cue = cue.strip().lower()
-    if not cue or cue in GENERIC_QUERY_TERMS:
-        return False
-    if any("\u4e00" <= ch <= "\u9fff" for ch in cue):
-        return len(cue) >= 2 and cue in query_lc
-    if re.fullmatch(r"[a-z0-9]{1,2}", cue):
-        return cue in query_tokens
-    if len(cue) >= 3 and cue in query_lc:
-        return True
-    cue_tokens = _tokens(cue)
-    return bool(cue_tokens & query_tokens)
+def _path_under(path: str, scope: str) -> bool:
+    try:
+        return Path(path).resolve().as_posix().lower().startswith(Path(scope).resolve().as_posix().lower())
+    except OSError:
+        return path.lower().startswith(scope.lower())
 
 
-def _route_text(route: dict[str, Any]) -> str:
-    parts = [
-        route.get("title") or "",
-        route.get("brief") or "",
-        route.get("use_when") or "",
-        " ".join(route.get("tags") or []),
-        " ".join(route.get("route_terms") or []),
-    ]
-    meta = route.get("route_meta") or {}
-    for v in meta.values():
-        if isinstance(v, list):
-            parts.extend(str(x) for x in v)
-        elif isinstance(v, str):
-            parts.append(v)
-    return " ".join(parts)
-
-
-def _score_route(route: dict[str, Any], query: str) -> tuple[float, list[str]]:
-    query_tokens = _tokens(query)
-    query_lc = query.lower()
-    why: list[str] = []
-    score = route_score(route)
-    real_matches = 0
-
-    meta = route.get("route_meta") or {}
-    positive_cues = list(route.get("route_terms") or []) + list(meta.get("positive_cues") or [])
-    negative_cues = list(meta.get("negative_cues") or [])
-
-    for cue in positive_cues:
-        if _cue_matches(cue, query_tokens, query_lc):
-            real_matches += 1
-            score += 4
-            why.append(f"cue:{cue}")
-
-    for tag in route.get("tags") or []:
-        tag_lc = tag.lower()
-        if tag_lc and tag_lc not in GENERIC_TAGS and _cue_matches(tag_lc, query_tokens, query_lc):
-            real_matches += 1
-            score += 3
-            why.append(f"tag:{tag}")
-
-    role = str(meta.get("role") or "").strip()
-    if role and _cue_matches(role, query_tokens, query_lc):
-        real_matches += 1
-        score += 2
-        why.append("role cue")
-
-    boundary = str(meta.get("boundary_note") or "")
-    boundary_overlap = query_tokens & _tokens(boundary)
-    if boundary_overlap:
-        real_matches += 1
-        score += min(3, len(boundary_overlap))
-        why.append("boundary overlap")
-
-    negative_hits = [c for c in negative_cues if _cue_matches(c, query_tokens, query_lc)]
-    if negative_hits:
-        score -= len(negative_hits) * 3
-        why.append(f"negative_cue:{negative_hits[0]}")
-
-    if real_matches == 0:
-        text_tokens = _tokens(_route_text(route))
-        overlap = query_tokens & text_tokens
-        if overlap:
-            score += len(overlap) * 1.5
-            why.append("weak text overlap")
-        else:
-            score = -5
-            why.append("no real match")
-
-    stats = store.query_stats_for(route["route_id"], query)
-    if stats:
-        score += float(stats["positive_count"]) * 3
-        score -= float(stats["negative_count"]) * 5
-        if stats["positive_count"]:
-            why.append("positive feedback")
-        if stats["negative_count"]:
-            why.append("negative feedback")
-
-    return score, why or ["semantic route candidate"]
-
-
-def _route_card(route: dict[str, Any], score: float, why: list[str]) -> dict[str, Any]:
+def _enrich_leaf_hit(edge: dict[str, Any], leaf: dict[str, Any], tag: dict[str, Any] | None, source: str) -> dict[str, Any]:
+    excerpt = sanitize_display_text((leaf.get("text_head") or ""))[:300] or None
     return {
-        "route_id": route["route_id"],
-        "title": route["title"],
-        "brief": route["brief"],
-        "use_when": route.get("use_when"),
-        "anchor_path": route.get("anchor_path"),
-        "entrypoints": route.get("entrypoints", [])[:5],
-        "tags": route.get("tags", []),
-        "route_terms": route.get("route_terms", [])[:8],
-        "tier": route["tier"],
-        "confidence": route["confidence"],
-        "usage_verification": route.get("usage_verification", "seeded"),
-        "score": round(score, 3),
-        "why_match": why[:4],
+        "hit_type": "leaf",
+        "source": source,
+        "leaf_id": leaf["leaf_id"],
+        "path": leaf["path"],
+        "supporting_tags": [tag["tag"]] if tag else [],
+        "supporting_leaf_paths": [leaf["path"]],
+        "evidence_note": edge.get("evidence_note"),
+        "text_head_excerpt": excerpt,
+        "score": round(float(edge.get("weight", 1)) * 2, 3),
+        "fallback_used": source == "fallback",
     }
 
 
-def _annotation_hit(ann: dict[str, Any], score: float) -> dict[str, Any]:
+def _enrich_tag_hit(tag: dict[str, Any], score: float, source: str = "map") -> dict[str, Any]:
+    leaf_paths: list[str] = []
+    notes: list[str] = []
+    for edge in store.list_leaf_tag_edges(tag_id=tag["tag_id"])[:8]:
+        leaf = store.get_leaf(edge["leaf_id"])
+        if leaf:
+            leaf_paths.append(leaf["path"])
+            if edge.get("evidence_note"):
+                notes.append(edge["evidence_note"])
     return {
-        "annotation_id": ann["annotation_id"],
-        "path": ann["path"],
-        "tags": ann.get("tags", []),
-        "value_reason": ann.get("value_reason"),
-        "evidence_summary": ann.get("evidence_summary"),
-        "confidence": ann.get("confidence", 0),
+        "hit_type": "tag",
+        "source": source,
+        "tag_id": tag["tag_id"],
+        "tag": tag["tag"],
+        "supporting_tags": [tag["tag"]],
+        "supporting_leaf_paths": leaf_paths,
+        "evidence_note": notes[0] if notes else None,
+        "text_head_excerpt": None,
         "score": round(score, 3),
-        "hit_type": "annotation",
+        "fallback_used": False,
     }
 
 
-def recall_routes(query: str | None = None, scope: str | None = None, limit: int = DEFAULT_RECALL_LIMIT, **kwargs: Any) -> dict[str, Any]:
-    store.init_db()
-    q = (query or kwargs.get("task_intent") or kwargs.get("q") or "").strip()
-    scored: list[tuple[float, dict[str, Any], list[str]]] = []
-    for route in store.list_routes():
-        # fix8: filter routes by scope when provided
-        if scope and route.get("anchor_path"):
-            if not _is_under(route["anchor_path"], scope) and not _is_under(scope, route["anchor_path"]):
+def _enrich_node_hit(node: dict[str, Any], source: str = "map") -> dict[str, Any]:
+    edges = store.list_directory_tag_edges(node_id=node["node_id"])
+    tag_labels: list[str] = []
+    leaf_paths: list[str] = []
+    notes: list[str] = []
+    for e in edges[:5]:
+        t = store.get_tag(e["tag_id"])
+        if t:
+            tag_labels.append(t["tag"])
+    org = node.get("org_signals")
+    if isinstance(org, dict) and node_has_key_evidence_compression(node):
+        for lid in (org.get("key_evidence_leaf_ids") or [])[:5]:
+            leaf = store.get_leaf(lid)
+            if leaf:
+                leaf_paths.append(leaf["path"])
+                head = sanitize_display_text((leaf.get("text_head") or ""))
+                if head:
+                    notes.append(head[:200])
+    for e in edges[:3]:
+        for lte in store.list_leaf_tag_edges(tag_id=e["tag_id"])[:2]:
+            leaf = store.get_leaf(lte["leaf_id"])
+            if leaf and leaf["path"] not in leaf_paths:
+                leaf_paths.append(leaf["path"])
+                if lte.get("evidence_note"):
+                    notes.append(lte["evidence_note"])
+    excerpt = sanitize_display_text(notes[0])[:300] if notes else None
+    if isinstance(org, dict) and not excerpt:
+        brief = sanitize_display_text((org.get("compression_brief") or ""))
+        if brief:
+            excerpt = brief[:300]
+    return {
+        "hit_type": "node",
+        "source": source,
+        "node_id": node["node_id"],
+        "path": node["path"],
+        "node_type": node["node_type"],
+        "supporting_tags": tag_labels,
+        "supporting_leaf_paths": leaf_paths,
+        "evidence_note": notes[0] if notes else None,
+        "text_head_excerpt": excerpt,
+        "activation_weight": node.get("activation_weight"),
+        "score": float(node.get("activation_weight") or 0),
+        "fallback_used": False,
+    }
+
+
+def query_to_tag_candidates(query: str, scope: str | None = None) -> list[dict[str, Any]]:
+    """Match tags and overview; node matching uses activation + tag overlap only (no path-name boost)."""
+    q_tokens = _tokens(query)
+    q_lc = query.lower()
+    candidates: list[tuple[float, str, str, dict[str, Any]]] = []
+
+    for tag in store.list_tags():
+        tag_lc = tag["tag"]
+        score = 0.0
+        if tag_lc in q_lc:
+            score += 5
+        if q_tokens & _tokens(tag_lc):
+            score += len(q_tokens & _tokens(tag_lc)) * 3
+        if score > 0:
+            candidates.append((score, "tag", tag["tag_id"], {"tag": tag_lc, "tag_type": tag["tag_type"]}))
+
+    for entry in store.list_overview_entries():
+        if scope and entry.get("node_id"):
+            node = store.get_directory_node(entry["node_id"])
+            if node and not _path_under(node["path"], scope):
                 continue
-        s, why = _score_route(route, q)
-        if s > 0:
-            scored.append((s, route, why))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    hits = [_route_card(r, s, w) for s, r, w in scored[:limit]]
-    event = store.create_event("recall", query=q, route_ids=[h["route_id"] for h in hits],
-                               payload={"limit": limit, "hit_count": len(hits)})
+        text = f"{entry.get('title', '')} {entry.get('brief', '')}".lower()
+        overlap = q_tokens & _tokens(text)
+        score = len(overlap) * 2.5
+        if score > 0:
+            candidates.append((score, "overview", entry["entry_id"], {"title": entry["title"]}))
+
+    for node in store.list_directory_nodes():
+        if scope and not _path_under(node["path"], scope):
+            continue
+        edges = store.list_directory_tag_edges(node_id=node["node_id"])
+        tag_overlap = 0.0
+        for e in edges:
+            t = store.get_tag(e["tag_id"])
+            if t and q_tokens & _tokens(t["tag"]):
+                tag_overlap += len(q_tokens & _tokens(t["tag"])) * 2
+        score = tag_overlap + float(node.get("activation_weight") or 0) * 0.15
+        if node_has_key_evidence_compression(node) and tag_overlap == 0:
+            org = node.get("org_signals")
+            if isinstance(org, dict):
+                brief = sanitize_display_text((org.get("compression_brief") or ""))
+                if brief and q_tokens & _tokens(brief):
+                    score += 2
+        if score > 0:
+            candidates.append((score, "node", node["node_id"], {"path": node["path"], "node_type": node["node_type"]}))
+
+    candidates.sort(key=lambda x: -x[0])
+    return [{"score": s, "kind": k, "id": i, **payload} for s, k, i, payload in candidates[:DEFAULT_RECALL_LIMIT * 2]]
+
+
+def _expand_leaves_for_tags(tag_ids: list[str], scope: str | None) -> list[dict[str, Any]]:
+    hits: list[tuple[float, dict[str, Any]]] = []
+    for tid in tag_ids:
+        for edge in store.list_leaf_tag_edges(tag_id=tid):
+            leaf = store.get_leaf(edge["leaf_id"])
+            if not leaf or leaf.get("semantic_status") != "tagged":
+                continue
+            if scope and not _path_under(leaf["path"], scope):
+                continue
+            tag = store.get_tag(tid)
+            score = float(edge["weight"]) * 2
+            hits.append((score, _enrich_leaf_hit(edge, leaf, tag, "map")))
+    hits.sort(key=lambda x: -x[0])
+    seen: set[str] = set()
+    out = []
+    for _, h in hits:
+        if h["leaf_id"] in seen:
+            continue
+        seen.add(h["leaf_id"])
+        out.append(h)
+    return out[:DEFAULT_RECALL_LIMIT]
+
+
+def _expand_nodes(node_ids: list[str], scope: str | None) -> list[dict[str, Any]]:
+    hits = []
+    for nid in node_ids:
+        node = store.get_directory_node(nid)
+        if not node:
+            continue
+        if scope and not _path_under(node["path"], scope):
+            continue
+        hits.append(_enrich_node_hit(node, "map"))
+    return hits
+
+
+def query_map(query: str, scope: str | None = None, limit: int = DEFAULT_RECALL_LIMIT) -> dict[str, Any]:
+    store.init_db()
+    candidates = query_to_tag_candidates(query, scope=scope)
+    tag_ids = [c["id"] for c in candidates if c["kind"] == "tag"]
+    node_ids = [c["id"] for c in candidates if c["kind"] == "node"]
+
+    tag_hits = []
+    for c in candidates:
+        if c["kind"] != "tag":
+            continue
+        tag = store.get_tag(c["id"])
+        if tag:
+            tag_hits.append(_enrich_tag_hit(tag, c["score"], "map"))
+    tag_hits = tag_hits[:limit]
+
+    node_hits = _expand_nodes(node_ids, scope)[:limit]
+    leaf_hits = _expand_leaves_for_tags(tag_ids, scope)[:limit]
+
+    if not tag_ids and candidates:
+        for c in candidates:
+            if c["kind"] == "overview":
+                entry = store.get_overview_entry(c["id"])
+                if entry:
+                    tag_ids.extend(entry.get("supporting_tag_ids", []))
+                    if entry.get("node_id"):
+                        node_ids.append(entry["node_id"])
+        leaf_hits = _expand_leaves_for_tags(tag_ids, scope)[:limit]
+        node_hits = _expand_nodes(list(set(node_ids)), scope)[:limit]
+
     return {
         "ok": True,
-        "query": q,
-        "hits": hits,
-        "routes": hits,
-        "hit_count": len(hits),
-        "fallback_suggested": len(hits) == 0,
-        "event_id": event["event_id"],
+        "query": query,
+        "tag_hits": tag_hits,
+        "node_hits": node_hits,
+        "leaf_hits": leaf_hits,
     }
-
-
-def recall_hits(query: str, limit: int = DEFAULT_RECALL_LIMIT, **kwargs: Any) -> list[dict[str, Any]]:
-    return list(recall_routes(query, limit=limit, **kwargs).get("hits") or [])
-
-
-def list_route_cards(limit: int = 50, tier: str | None = None, status: str = "active") -> list[dict[str, Any]]:
-    routes = store.list_routes(status=status)
-    if tier:
-        routes = [r for r in routes if r.get("tier") == tier]
-    routes = sorted(routes, key=route_score, reverse=True)[:max(0, int(limit))]
-    return [_route_card(r, route_score(r), ["listed"]) for r in routes]
 
 
 def run_file_query(query: str, scope: str | None = None, limit: int = DEFAULT_RECALL_LIMIT, fallback: bool = True) -> dict[str, Any]:
-    """Multi-layer recall: route -> annotation -> deferred -> es fallback."""
     store.init_db()
+    mapped = query_map(query, scope=scope, limit=limit)
+    tag_hits = mapped.get("tag_hits", [])
+    node_hits = mapped.get("node_hits", [])
+    leaf_hits = mapped.get("leaf_hits", [])
 
-    route_recall = recall_routes(query, scope=scope, limit=limit)
-    route_hits = list(route_recall.get("hits") or [])
-
-    ann_hits_raw = search_file_annotations(query, scope=scope, limit=limit)
-    ann_hits = [_annotation_hit(a, 0) for a in ann_hits_raw]
-    for i, h in enumerate(ann_hits):
-        h["score"] = round(10.0 - i * 0.5, 3)
-    ann_hits = [h for h in ann_hits if h["score"] > 2]
-
-    # fix9: deferred_hits with query scoring and scope filter
-    deferred_hits = _score_deferred(query, scope=scope, limit=5)
+    deferred_hits: list[dict[str, Any]] = []
+    for leaf in store.list_leaves(semantic_status="deferred", limit=200):
+        if scope and not _path_under(leaf["path"], scope):
+            continue
+        reason = leaf.get("extract_error") or leaf.get("readable_status") or ""
+        if any(t in reason.lower() for t in _tokens(query)):
+            deferred_hits.append({
+                "hit_type": "deferred",
+                "source": "map",
+                "leaf_id": leaf["leaf_id"],
+                "path": leaf["path"],
+                "supporting_tags": [],
+                "supporting_leaf_paths": [leaf["path"]],
+                "evidence_note": reason,
+                "text_head_excerpt": (leaf.get("text_head") or "")[:300] or None,
+                "reason": reason,
+                "score": 1.0,
+                "fallback_used": False,
+            })
 
     search_hits: list[dict[str, Any]] = []
     fallback_used = False
     fallback_reason = None
+    strong = any(h.get("score", 0) > 3 for h in leaf_hits + tag_hits)
 
-    has_strong = any(h.get("score", 0) > 5 for h in route_hits)
-    if fallback and not has_strong and len(route_hits) + len(ann_hits) < min(3, limit):
+    if fallback and not strong and len(leaf_hits) + len(node_hits) < min(3, limit):
         try:
-            search_hits = search_files_rows(query, scope=scope, limit=limit)
+            rows = search_files_rows(query, scope=scope, limit=limit)
+            for r in rows:
+                search_hits.append({
+                    **r,
+                    "hit_type": "search",
+                    "source": "fallback",
+                    "supporting_tags": [],
+                    "supporting_leaf_paths": [r.get("path")] if r.get("path") else [],
+                    "evidence_note": "everything_search",
+                    "text_head_excerpt": None,
+                    "score": 1.0,
+                    "fallback_used": True,
+                })
             fallback_used = True
-            fallback_reason = "insufficient route and annotation hits"
+            fallback_reason = "weak map hits"
         except Exception as exc:
             fallback_reason = str(exc)
 
-    seen: set[str] = set()
     all_hits: list[dict[str, Any]] = []
-    for h in route_hits + ann_hits:
-        key = h.get("route_id") or h.get("annotation_id") or h.get("path") or str(h)
-        if key not in seen:
-            seen.add(key)
+    seen: set[str] = set()
+    for h in tag_hits + node_hits + leaf_hits:
+        key = h.get("leaf_id") or h.get("node_id") or h.get("tag_id") or h.get("path")
+        if key and key not in seen:
+            seen.add(str(key))
+            h["fallback_used"] = h.get("fallback_used", False)
             all_hits.append(h)
     for h in search_hits:
-        p = h.get("path") or ""
+        p = h.get("path")
         if p and p not in seen:
             seen.add(p)
             all_hits.append(h)
 
-    if route_hits:
-        action = "use_route"
-    elif ann_hits:
-        action = "inspect_annotation"
+    if leaf_hits:
+        action = "inspect_leaf"
+    elif node_hits:
+        action = "inspect_node"
     elif search_hits:
         action = "fallback_search"
     else:
         action = "ask_user"
 
+    store.create_event("query", query=query, paths=[h.get("path") for h in leaf_hits if h.get("path")],
+                       payload={"tag_hits": len(tag_hits), "node_hits": len(node_hits)})
+
     return {
         "ok": True,
-        "schema_version": "lso_runtime_v2",
+        "schema_version": "lso_runtime_v3",
         "query": query,
-        "route_hits": route_hits,
-        "file_annotation_hits": ann_hits,
-        "deferred_hits": deferred_hits,
+        "tag_hits": tag_hits,
+        "node_hits": node_hits,
+        "leaf_hits": leaf_hits,
+        "route_hits": [],
+        "file_annotation_hits": [],
+        "deferred_hits": deferred_hits[:5],
         "search_hits": search_hits,
         "all_hits": all_hits,
-        "routes": route_hits,
-        "hits": all_hits,
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,
         "recommended_next_action": action,
         "finalize_required": True,
-    }
-
-
-def expand_route(route_id: str, query: str | None = None, budget: str = "brief") -> dict[str, Any]:
-    route = store.get_route(route_id)
-    if not route:
-        return {"ok": False, "route_id": route_id, "error": "route not found"}
-    limits = {"brief": 5, "normal": DEFAULT_EVIDENCE_LIMIT, "full": 50}
-    limit = limits.get(budget, DEFAULT_EVIDENCE_LIMIT)
-
-    ann_ids = route.get("supporting_annotation_ids") or []
-    annotations = [store.get_annotation(aid) for aid in ann_ids]
-    annotations = [a for a in annotations if a][:limit]
-
-    store.create_event("expand", query=query, route_ids=[route_id], payload={"budget": budget})
-    return {
-        "ok": True,
-        "route": _route_card(route, route_score(route), ["expanded"]),
-        "entrypoints": route.get("entrypoints", []),
-        "supporting_annotations": annotations,
-        "route_meta": route.get("route_meta", {}),
+        "evidence_scope": {
+            "map_hits": len(tag_hits) + len(node_hits) + len(leaf_hits),
+            "fallback_hits": len(search_hits),
+            "partial_index": True,
+        },
     }
 
 
 def system_overview(max_chars: int = 1500) -> dict[str, Any]:
-    routes = sorted(store.list_routes(), key=route_score, reverse=True)[:20]
-    ann_count = store.lso_counts().get("annotated", 0)
-    lines = [f"LSO overview: {len(routes)} active routes, {ann_count} file annotations"]
-    for r in routes:
-        line = f"- {r['title']}: {r['brief']} | tier={r['tier']} anchor={r.get('anchor_path', '?')}"
-        lines.append(line)
+    entries = store.list_overview_entries(limit=30)
+    counts = store.lso_counts()
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT session_id, scope FROM ingestion_sessions ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    diagnostics = None
+    if row:
+        diagnostics = build_ingestion_diagnostics(row["session_id"])
+
+    lines = [f"LSO v3 overview: {len(entries)} entries (partial index)"]
+    for e in entries:
+        lines.append(f"- {e['title']}: {e['brief'][:120]}")
     text = "\n".join(lines)
     if len(text) > max_chars:
-        text = text[:max_chars - 3] + "..."
-    return {"ok": True, "overview": text, "route_count": len(routes), "annotation_count": ann_count}
+        text = text[: max_chars - 3] + "..."
 
+    all_nodes = store.list_directory_nodes(limit=5000)
+    directory_macro_type_nodes = sum(1 for n in all_nodes if n.get("node_type") == "directory_macro")
+    key_evidence_compression_nodes = sum(1 for n in all_nodes if node_has_key_evidence_compression(n))
 
-def begin_file_task(query: str) -> dict[str, Any]:
-    task_id = store.new_id("task")
-    event = store.create_event("begin_task", query=query, task_id=task_id)
-    return {"ok": True, "task_id": task_id, "query": query, "event_id": event["event_id"]}
-
-
-def finish_file_query(
-    result: dict[str, Any],
-    used: list[str] | None = None,
-    found: list[str] | None = None,
-    rejected: list[str] | None = None,
-    selected_routes: list[str] | None = None,
-    selected_annotations: list[str] | None = None,
-) -> dict[str, Any]:
-    """Close the loop: record what was used/found/rejected."""
-    query = result.get("query") or ""
-    used_paths = [store.normalize_path(p) for p in (used or []) if p]
-    found_paths = [store.normalize_path(p) for p in (found or []) if p]
-    rejected_paths = [store.normalize_path(p) for p in (rejected or []) if p]
-    route_ids = [rid for rid in (selected_routes or []) if store.get_route(rid)]
-    ann_ids = [aid for aid in (selected_annotations or []) if store.get_annotation(aid)]
-
-    updated_routes: set[str] = set()
-    for rid in route_ids:
-        store.bump_route(rid, usage_delta=1, confidence_delta=0.03, tier="active", used=True)
-        store.upsert_query_stats(rid, query, positive=1, note="route selected")
-        updated_routes.add(rid)
-
-    for aid in ann_ids:
-        store.bump_annotation_use(aid, delta=1)
-
-    for rid in route_ids:
-        if rejected_paths:
-            store.bump_route(rid, risk_delta=0.2)
-            store.upsert_query_stats(rid, query, negative=len(rejected_paths), note="rejected path")
-
-    recalled_not_selected = set()
-    for h in result.get("route_hits") or []:
-        rid = h.get("route_id")
-        if rid and rid not in route_ids:
-            recalled_not_selected.add(rid)
-            store.upsert_query_stats(rid, query, negative=0, note="recalled but not selected (weak negative)")
-
-    plans: list[dict[str, Any]] = []
-    fallback_found = [p for p in found_paths if p not in used_paths]
-    if fallback_found:
-        plan = store.create_update_plan("deferred_evidence", query=query,
-                                        payload={"paths": fallback_found, "reason": "fallback_found"})
-        plans.append(plan)
-        for p in fallback_found:
-            store.create_deferred("evidence", "found via fallback, not yet annotated",
-                                  evidence_id=None, annotation_id=None)
-
-    event = store.create_event(
-        "finish_query", query=query,
-        route_ids=route_ids, annotation_ids=ann_ids,
-        paths=used_paths + found_paths + rejected_paths,
-        payload={
-            "used": used_paths, "found": found_paths, "rejected": rejected_paths,
-            "selected_routes": route_ids, "selected_annotations": ann_ids,
-            "created_plans": [p["plan_id"] for p in plans],
-        },
-    )
-    maint = maintenance_tick()
-    return {
-        "ok": True,
-        "query": query,
-        "event_id": event["event_id"],
-        "updated_routes": sorted(updated_routes),
-        "updated_annotations": ann_ids,
-        "created_update_plans": plans,
-        "maintenance": maint,
+    coverage_basis = {
+        "readable_leaves": counts.get("readable_leaves", 0),
+        "tagged_leaves": counts.get("tagged_leaves", 0),
+        "semantic_nodes": counts.get("semantic_nodes", 0),
+        "overview_entries": counts.get("overview_entries", 0),
+        "directory_macros": directory_macro_type_nodes,
+        "directory_macro_type_nodes": directory_macro_type_nodes,
+        "key_evidence_compression_nodes": key_evidence_compression_nodes,
     }
+    weak_or_uncovered: list[str] = []
+    dominant_sources: dict[str, int] = {}
+    if diagnostics:
+        weak_or_uncovered = (
+            diagnostics.get("blind_spots", {}).get("readable_heavy_but_untagged", [])[:10]
+            + diagnostics.get("blind_spots", {}).get("document_rich_but_unrepresented", [])[:5]
+        )
+        dominant_sources = diagnostics.get("by_seed_source", {})
 
-
-def finish_local_file_task(
-    query: str,
-    used: list[str] | None = None,
-    found: list[str] | None = None,
-    rejected: list[str] | None = None,
-    selected_routes: list[str] | None = None,
-    selected_annotations: list[str] | None = None,
-) -> dict[str, Any]:
-    """Alias for finish_file_query with a synthetic result dict."""
-    result = {"query": query, "route_hits": [], "file_annotation_hits": []}
-    return finish_file_query(result, used=used, found=found, rejected=rejected,
-                             selected_routes=selected_routes, selected_annotations=selected_annotations)
-
-
-def apply_update_plan(plan_id: str) -> dict[str, Any]:
-    plan = store.get_update_plan(plan_id)
-    if not plan:
-        return {"ok": False, "plan_id": plan_id, "error": "update plan not found"}
-    if plan["status"] != "draft":
-        return {"ok": False, "plan_id": plan_id, "error": f"plan is {plan['status']}"}
-    store.mark_update_plan(plan_id, "applied")
-    return {"ok": True, "plan_id": plan_id, "applied": plan["kind"]}
-
-
-def record_correction(query: str, wrong_paths: list[str] | None = None, missed_paths: list[str] | None = None, note: str = "") -> dict[str, Any]:
-    wrong = [store.normalize_path(p) for p in (wrong_paths or []) if p]
-    missed = [store.normalize_path(p) for p in (missed_paths or []) if p]
-    correction = store.create_correction(query, wrong, missed, note)
-    plans: list[dict[str, Any]] = []
-    if missed:
-        plan = store.create_update_plan("deferred_evidence", query=query,
-                                        payload={"paths": missed, "reason": "user_correction"})
-        plans.append(plan)
-    for route in store.list_routes():
-        anchor = route.get("anchor_path") or ""
-        if anchor and any(_is_under(p, anchor) for p in wrong):
-            store.bump_route(route["route_id"], risk_delta=0.5)
-            store.upsert_query_stats(route["route_id"], query, negative=1, note=note or "user correction")
-    event = store.create_event("correction", query=query, paths=wrong + missed,
-                               payload={"note": note, "plans": [p["plan_id"] for p in plans]})
-    return {"ok": True, "correction": correction, "event_id": event["event_id"], "created_plans": plans}
-
-
-def _is_under(path: str, anchor: str) -> bool:
-    try:
-        return Path(path).resolve() == Path(anchor).resolve() or Path(anchor).resolve() in Path(path).resolve().parents
-    except OSError:
-        return path.lower().startswith(anchor.rstrip("\\/").lower() + os.sep.lower())
-
-
-def _score_deferred(query: str, scope: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
-    """Score deferred items against the query instead of returning them blindly."""
-    raw = store.list_deferred(status="pending", limit=200)
-    if not raw:
-        return []
-    query_tokens = _tokens(query)
-    query_lc = query.lower()
-    scored: list[tuple[float, dict[str, Any]]] = []
-    for d in raw:
-        reason_lc = (d.get("reason") or "").lower()
-        reason_tokens = _tokens(reason_lc)
-        overlap = query_tokens & reason_tokens
-        s = len(overlap) * 2.0
-        for cue in query_tokens:
-            if len(cue) >= 2 and cue in reason_lc:
-                s += 1.5
-        if s <= 0:
-            continue
-        hit = {"deferred_id": d["deferred_id"], "kind": d["kind"], "reason": d["reason"],
-               "hit_type": "deferred", "score": round(s, 3)}
-        scored.append((s, hit))
-    scored.sort(key=lambda x: -x[0])
-    return [h for _, h in scored[:limit]]
-
-
-def update_route_tags(
-    route_id: str,
-    add: list[str] | None = None,
-    remove: list[str] | None = None,
-    evidence_note: str | None = None,
-    mode: str = "draft",
-) -> dict[str, Any]:
-    note = (evidence_note or "").strip()
-    if not note:
-        return {"ok": False, "route_id": route_id, "error": "evidence_note required"}
-    route = store.get_route(route_id)
-    if not route:
-        return {"ok": False, "route_id": route_id, "error": "route not found"}
-
-    add_set = {t.strip().lower() for t in (add or []) if t.strip()}
-    remove_set = {t.strip().lower() for t in (remove or []) if t.strip()}
-    bad = sorted(add_set & GENERIC_TAGS)
-    if bad:
-        return {"ok": False, "route_id": route_id, "error": "generic tags not allowed", "tags": bad}
-
-    current = {t.lower() for t in (route.get("tags") or [])}
-    next_tags = sorted((current | add_set) - remove_set)
-    payload = {"route_id": route_id, "add": sorted(add_set), "remove": sorted(remove_set),
-               "next_tags": next_tags, "evidence_note": note}
-
-    if mode == "draft":
-        plan = store.create_update_plan("route_tag_update", payload=payload)
-        return {"ok": True, "status": "draft", "draft_plan": plan, **payload}
-
-    with store.connect() as conn:
-        conn.execute("UPDATE routes SET tags_json=?, updated_at=? WHERE route_id=?",
-                     (store.json_dumps(next_tags), store.now_iso(), route_id))
-    store.create_event("route_tag_update", route_ids=[route_id], payload=payload)
-    return {"ok": True, "status": "applied", "route_id": route_id, **payload}
-
-
-def audit_runtime(limit: int = 200) -> dict[str, Any]:
-    events = store.list_events(limit=limit)
-    warnings: list[dict[str, Any]] = []
-    recalls = [e for e in events if e["event_type"] == "recall"]
-    finishes = [e for e in events if e["event_type"] == "finish_query"]
-    finished_queries = {e.get("query") or "" for e in finishes}
-    selected_routes: set[str] = set()
-    for e in finishes:
-        selected_routes.update(e.get("route_ids") or [])
-        p = e.get("payload") or {}
-        selected_routes.update(p.get("selected_routes") or [])
-        if (p.get("found") or p.get("used")) and not p.get("created_plans"):
-            warnings.append({"kind": "fallback_without_plan", "event_id": e["event_id"], "query": e.get("query")})
-
-    recalled_routes: set[str] = set()
-    for e in recalls:
-        recalled_routes.update(e.get("route_ids") or [])
-        if e.get("query") not in finished_queries:
-            warnings.append({"kind": "recall_not_finalized", "event_id": e["event_id"], "query": e.get("query")})
-
-    unconsumed = sorted(recalled_routes - selected_routes)
-    if unconsumed:
-        warnings.append({"kind": "recalled_not_consumed", "count": len(unconsumed), "route_ids": unconsumed[:20]})
+    macro_nodes = build_macro_node_reports(limit=50)
+    if diagnostics and diagnostics.get("macro_nodes"):
+        macro_nodes = diagnostics.get("macro_nodes") or macro_nodes
 
     return {
         "ok": True,
-        "event_count": len(events),
-        "recall_count": len(recalls),
-        "finish_count": len(finishes),
-        "warning_count": len(warnings),
-        "warnings": warnings,
+        "overview": text,
+        "entry_count": len(entries),
+        "counts": counts,
+        "coverage_basis": coverage_basis,
+        "weak_or_uncovered_areas": weak_or_uncovered,
+        "dominant_evidence_sources": dominant_sources,
+        "macro_nodes": macro_nodes,
+        "macro_coverage_note": (
+            "macro_nodes list key-evidence compression "
+            "(org_signals.compression_role=key_evidence_macro with key_evidence_leaf_ids); "
+            "node_type may be semantic_node or directory_macro — not full directory coverage."
+        ),
+        "partial_map_warning": "Partial index only — reflects tagged/key-evidence coverage, not full disk.",
     }
 
 
 def lso_summary() -> dict[str, Any]:
-    counts = store.lso_counts()
-    tiers = counts.get("tiers") or {}
-    routes = list_route_cards(limit=50)
-    return {
-        "ok": True,
-        "counts": counts,
-        "route_count": counts.get("routes", 0),
-        "annotation_count": counts.get("annotated", 0),
-        "active_routes": int(tiers.get("active") or 0),
-        "warm_routes": int(tiers.get("warm") or 0),
-        "cold_routes": int(tiers.get("cold") or 0),
-        "db_path": counts.get("db_path"),
-        "routes": routes,
-    }
+    return {"ok": True, "counts": store.lso_counts()}

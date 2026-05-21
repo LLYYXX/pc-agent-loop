@@ -1,4 +1,4 @@
-"""SQLite persistence for Local Semantic Overlay v2 (Area-Aware Annotation-First)."""
+"""SQLite schema and CRUD only. No semantic policy."""
 
 from __future__ import annotations
 
@@ -37,10 +37,6 @@ def normalize_path(path: str | Path) -> str:
     return str(Path(str(path)).expanduser())
 
 
-def query_key(query: str) -> str:
-    return " ".join(str(query).lower().split())
-
-
 def connect() -> sqlite3.Connection:
     db = config.DB_PATH
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -52,10 +48,10 @@ def connect() -> sqlite3.Connection:
 
 
 _SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS seed_map_sessions (
+CREATE TABLE IF NOT EXISTS ingestion_sessions (
     session_id TEXT PRIMARY KEY,
     scope TEXT NOT NULL,
-    route_budget INTEGER NOT NULL,
+    leaf_budget INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
     report_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -63,98 +59,87 @@ CREATE TABLE IF NOT EXISTS seed_map_sessions (
     finished_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS areas (
-    area_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES seed_map_sessions(session_id) ON DELETE CASCADE,
-    path TEXT NOT NULL,
-    parent_area_id TEXT,
-    depth INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'unseen',
-    file_count INTEGER NOT NULL DEFAULT 0,
-    dir_count INTEGER NOT NULL DEFAULT 0,
-    signals_json TEXT NOT NULL DEFAULT '[]',
-    profile_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(session_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS evidence_items (
-    evidence_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES seed_map_sessions(session_id) ON DELETE CASCADE,
-    area_id TEXT NOT NULL REFERENCES areas(area_id) ON DELETE CASCADE,
-    path TEXT NOT NULL,
-    bucket TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS leaves (
+    leaf_id TEXT PRIMARY KEY,
+    session_id TEXT REFERENCES ingestion_sessions(session_id) ON DELETE SET NULL,
+    path TEXT NOT NULL UNIQUE,
+    parent_directory_path TEXT,
+    readable_status TEXT NOT NULL,
+    evidence_type TEXT,
+    semantic_status TEXT NOT NULL DEFAULT 'seed',
     text_head TEXT,
     extract_error TEXT,
-    weight REAL NOT NULL DEFAULT 1.0,
-    meta_json TEXT NOT NULL DEFAULT '{}',
+    mtime REAL,
+    ctime REAL,
+    size INTEGER,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    reject_count INTEGER NOT NULL DEFAULT 0,
+    confirm_count INTEGER NOT NULL DEFAULT 0,
+    seed_source TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS semantic_tags (
+    tag_id TEXT PRIMARY KEY,
+    tag TEXT NOT NULL UNIQUE,
+    tag_type TEXT NOT NULL DEFAULT 'semantic',
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS file_annotations (
-    annotation_id TEXT PRIMARY KEY,
-    session_id TEXT,
-    evidence_id TEXT,
-    area_id TEXT,
-    path TEXT NOT NULL,
-    decision TEXT NOT NULL,
-    tags_json TEXT NOT NULL DEFAULT '[]',
-    value_reason TEXT,
-    evidence_summary TEXT,
-    confidence REAL NOT NULL DEFAULT 0.5,
-    use_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS route_proposals (
-    proposal_id TEXT PRIMARY KEY,
-    session_id TEXT,
-    status TEXT NOT NULL DEFAULT 'proposed',
-    title TEXT,
-    brief TEXT,
-    supporting_annotation_ids_json TEXT NOT NULL DEFAULT '[]',
-    anchor_path TEXT,
-    tags_json TEXT NOT NULL DEFAULT '[]',
-    meta_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS routes (
-    route_id TEXT PRIMARY KEY,
-    proposal_id TEXT,
-    title TEXT NOT NULL,
-    brief TEXT NOT NULL,
-    use_when TEXT,
-    anchor_path TEXT,
-    entrypoints_json TEXT NOT NULL DEFAULT '[]',
-    supporting_annotation_ids_json TEXT NOT NULL DEFAULT '[]',
-    tags_json TEXT NOT NULL DEFAULT '[]',
-    route_terms_json TEXT NOT NULL DEFAULT '[]',
-    route_meta_json TEXT NOT NULL DEFAULT '{}',
-    tier TEXT NOT NULL DEFAULT 'warm',
-    status TEXT NOT NULL DEFAULT 'active',
-    usage_verification TEXT NOT NULL DEFAULT 'seeded',
-    confidence REAL NOT NULL DEFAULT 0.5,
-    usage_score REAL NOT NULL DEFAULT 0,
-    quality_score REAL NOT NULL DEFAULT 0,
-    risk_score REAL NOT NULL DEFAULT 0,
-    source TEXT,
+CREATE TABLE IF NOT EXISTS leaf_tag_edges (
+    edge_id TEXT PRIMARY KEY,
+    leaf_id TEXT NOT NULL REFERENCES leaves(leaf_id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL REFERENCES semantic_tags(tag_id) ON DELETE CASCADE,
+    weight REAL NOT NULL DEFAULT 1.0,
+    source TEXT NOT NULL DEFAULT 'llm',
+    evidence_note TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_used TEXT
+    UNIQUE(leaf_id, tag_id)
 );
 
-CREATE TABLE IF NOT EXISTS deferred_items (
-    deferred_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    area_id TEXT,
-    evidence_id TEXT,
-    annotation_id TEXT,
-    reason TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
+CREATE TABLE IF NOT EXISTS directory_nodes (
+    node_id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    parent_node_id TEXT,
+    depth INTEGER NOT NULL DEFAULT 0,
+    node_type TEXT NOT NULL DEFAULT 'container',
+    sampling_weight REAL NOT NULL DEFAULT 0,
+    compression_weight REAL NOT NULL DEFAULT 0,
+    activation_weight REAL NOT NULL DEFAULT 0,
+    org_signals_json TEXT NOT NULL DEFAULT '[]',
+    readable_leaf_count INTEGER NOT NULL DEFAULT 0,
+    tagged_leaf_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS directory_tag_edges (
+    edge_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL REFERENCES directory_nodes(node_id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL REFERENCES semantic_tags(tag_id) ON DELETE CASCADE,
+    weight REAL NOT NULL DEFAULT 0,
+    edge_kind TEXT NOT NULL DEFAULT 'aggregated_semantic',
+    leaf_support_count INTEGER NOT NULL DEFAULT 0,
+    tagged_leaf_ratio REAL NOT NULL DEFAULT 0,
+    propagation_status TEXT NOT NULL DEFAULT 'local',
+    source_child_node_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(node_id, tag_id, edge_kind)
+);
+
+CREATE TABLE IF NOT EXISTS overview_entries (
+    entry_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL REFERENCES directory_nodes(node_id) ON DELETE CASCADE,
+    entry_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    brief TEXT NOT NULL,
+    supporting_leaf_ids_json TEXT NOT NULL DEFAULT '[]',
+    supporting_tag_ids_json TEXT NOT NULL DEFAULT '[]',
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    activation_weight REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -164,746 +149,585 @@ CREATE TABLE IF NOT EXISTS task_events (
     task_id TEXT,
     event_type TEXT NOT NULL,
     query TEXT,
-    route_ids_json TEXT NOT NULL DEFAULT '[]',
-    annotation_ids_json TEXT NOT NULL DEFAULT '[]',
     paths_json TEXT NOT NULL DEFAULT '[]',
     payload_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS route_query_stats (
-    route_id TEXT NOT NULL,
-    query_key TEXT NOT NULL,
-    query TEXT NOT NULL,
-    positive_count INTEGER NOT NULL DEFAULT 0,
-    negative_count INTEGER NOT NULL DEFAULT 0,
-    last_positive TEXT,
-    last_negative TEXT,
-    notes_json TEXT NOT NULL DEFAULT '[]',
-    PRIMARY KEY(route_id, query_key)
-);
-
-CREATE TABLE IF NOT EXISTS update_plans (
-    plan_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    query TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    applied_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS corrections (
-    correction_id TEXT PRIMARY KEY,
-    query TEXT NOT NULL,
-    wrong_paths_json TEXT NOT NULL DEFAULT '[]',
-    missed_paths_json TEXT NOT NULL DEFAULT '[]',
-    note TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_areas_session ON areas(session_id);
-CREATE INDEX IF NOT EXISTS idx_areas_status ON areas(status);
-CREATE INDEX IF NOT EXISTS idx_areas_path ON areas(path);
-CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence_items(session_id);
-CREATE INDEX IF NOT EXISTS idx_evidence_area ON evidence_items(area_id);
-CREATE INDEX IF NOT EXISTS idx_evidence_path ON evidence_items(path);
-CREATE INDEX IF NOT EXISTS idx_annotations_session ON file_annotations(session_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_area ON file_annotations(area_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_decision ON file_annotations(decision);
-CREATE INDEX IF NOT EXISTS idx_annotations_path ON file_annotations(path);
-CREATE INDEX IF NOT EXISTS idx_proposals_session ON route_proposals(session_id);
-CREATE INDEX IF NOT EXISTS idx_proposals_status ON route_proposals(status);
-CREATE INDEX IF NOT EXISTS idx_routes_tier ON routes(tier);
-CREATE INDEX IF NOT EXISTS idx_routes_status ON routes(status);
-CREATE INDEX IF NOT EXISTS idx_routes_anchor ON routes(anchor_path);
-CREATE INDEX IF NOT EXISTS idx_deferred_status ON deferred_items(status);
-CREATE INDEX IF NOT EXISTS idx_events_type ON task_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_plans_status ON update_plans(status);
+CREATE INDEX IF NOT EXISTS idx_leaves_session ON leaves(session_id);
+CREATE INDEX IF NOT EXISTS idx_leaves_readable ON leaves(readable_status);
+CREATE INDEX IF NOT EXISTS idx_leaves_semantic ON leaves(semantic_status);
+CREATE INDEX IF NOT EXISTS idx_leaf_edges_leaf ON leaf_tag_edges(leaf_id);
+CREATE INDEX IF NOT EXISTS idx_leaf_edges_tag ON leaf_tag_edges(tag_id);
+CREATE INDEX IF NOT EXISTS idx_dir_nodes_type ON directory_nodes(node_type);
+CREATE INDEX IF NOT EXISTS idx_dir_edges_node ON directory_tag_edges(node_id);
+CREATE INDEX IF NOT EXISTS idx_overview_node ON overview_entries(node_id);
 """
 
 
-def init_db() -> dict[str, Any]:
+def default_session_state() -> dict[str, Any]:
+    return {
+        "compress_done": False,
+        "bundles_processed": 0,
+        "annotations_applied": 0,
+        "pending_bundles": {},
+    }
+
+
+def _migrate_ingestion_sessions(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ingestion_sessions)").fetchall()}
+    additions = [
+        ("candidate_leaf_budget", "INTEGER"),
+        ("annotation_budget", "INTEGER"),
+        ("bundle_budget", "INTEGER"),
+        ("state_json", "TEXT"),
+    ]
+    for name, typ in additions:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE ingestion_sessions ADD COLUMN {name} {typ}")
+
+
+def init_db(reset: bool = False) -> dict[str, Any]:
+    if reset and config.DB_PATH.exists():
+        config.DB_PATH.unlink(missing_ok=True)
+        wal = config.DB_PATH.parent / (config.DB_PATH.name + "-wal")
+        shm = config.DB_PATH.parent / (config.DB_PATH.name + "-shm")
+        wal.unlink(missing_ok=True)
+        shm.unlink(missing_ok=True)
     with connect() as conn:
         conn.executescript(_SCHEMA_SQL)
+        _migrate_ingestion_sessions(conn)
     return {"ok": True, "db_path": str(config.DB_PATH)}
 
 
-# ---------------------------------------------------------------------------
-# Seed map sessions
-# ---------------------------------------------------------------------------
+# --- ingestion_sessions ---
 
-def create_seed_session(scope: str, route_budget: int) -> dict[str, Any]:
+def create_ingestion_session(
+    scope: str,
+    leaf_budget: int,
+    *,
+    candidate_leaf_budget: int | None = None,
+    annotation_budget: int | None = None,
+    bundle_budget: int | None = None,
+) -> dict[str, Any]:
     init_db()
-    session_id = new_id("seed")
+    sid = new_id("ing")
     ts = now_iso()
+    cand = int(candidate_leaf_budget if candidate_leaf_budget is not None else leaf_budget)
+    ann = int(annotation_budget if annotation_budget is not None else config.DEFAULT_ANNOTATION_BUDGET)
+    bnd = int(bundle_budget if bundle_budget is not None else config.DEFAULT_BUNDLE_BUDGET)
+    state = default_session_state()
     with connect() as conn:
+        _migrate_ingestion_sessions(conn)
         conn.execute(
-            "INSERT INTO seed_map_sessions (session_id, scope, route_budget, status, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (session_id, normalize_path(scope), int(route_budget), "open", ts, ts),
+            """INSERT INTO ingestion_sessions (
+                session_id, scope, leaf_budget, status, created_at, updated_at,
+                candidate_leaf_budget, annotation_budget, bundle_budget, state_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (sid, normalize_path(scope), cand, "open", ts, ts, cand, ann, bnd, json_dumps(state)),
         )
-    return get_seed_session(session_id) or {"session_id": session_id}
+    return get_ingestion_session(sid) or {"session_id": sid}
 
 
-def get_seed_session(session_id: str) -> dict[str, Any] | None:
-    init_db()
+def get_ingestion_session(session_id: str) -> dict[str, Any] | None:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM seed_map_sessions WHERE session_id=?", (session_id,)).fetchone()
+        _migrate_ingestion_sessions(conn)
+        row = conn.execute("SELECT * FROM ingestion_sessions WHERE session_id=?", (session_id,)).fetchone()
     if not row:
         return None
     d = dict(row)
     d["report"] = json_loads(d.pop("report_json"), {})
+    raw_state = d.get("state_json")
+    d["state"] = json_loads(raw_state, default_session_state()) if raw_state else default_session_state()
+    if d.get("candidate_leaf_budget") is None:
+        d["candidate_leaf_budget"] = d.get("leaf_budget", config.DEFAULT_CANDIDATE_LEAF_BUDGET)
+    if d.get("annotation_budget") is None:
+        d["annotation_budget"] = config.DEFAULT_ANNOTATION_BUDGET
+    if d.get("bundle_budget") is None:
+        d["bundle_budget"] = config.DEFAULT_BUNDLE_BUDGET
     return d
 
 
-def update_seed_session(session_id: str, *, status: str | None = None, report: dict[str, Any] | None = None) -> None:
-    session = get_seed_session(session_id)
+def get_session_state(session_id: str) -> dict[str, Any]:
+    session = get_ingestion_session(session_id)
+    if not session:
+        return default_session_state()
+    return session.get("state") or default_session_state()
+
+
+def patch_session_state(session_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    session = get_ingestion_session(session_id)
+    if not session:
+        return default_session_state()
+    state = default_session_state()
+    state.update(session.get("state") or {})
+    state.update(patch)
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE ingestion_sessions SET state_json=?, updated_at=? WHERE session_id=?",
+            (json_dumps(state), ts, session_id),
+        )
+    return state
+
+
+def get_latest_open_session_id() -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT session_id FROM ingestion_sessions WHERE status='open' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            return row["session_id"]
+        row2 = conn.execute(
+            "SELECT session_id FROM ingestion_sessions ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row2["session_id"] if row2 else None
+
+
+def update_ingestion_session(session_id: str, *, status: str | None = None, report: dict | None = None) -> None:
+    session = get_ingestion_session(session_id)
     if not session:
         return
     ts = now_iso()
     next_status = status or session["status"]
-    finished_at = ts if next_status in {"complete", "success", "incomplete", "failed"} else session.get("finished_at")
+    finished = session.get("finished_at")
+    if next_status in {"success", "incomplete", "failed", "completed"}:
+        finished = ts
     with connect() as conn:
         conn.execute(
-            "UPDATE seed_map_sessions SET status=?, report_json=?, updated_at=?, finished_at=? WHERE session_id=?",
-            (next_status, json_dumps(report if report is not None else session.get("report", {})), ts, finished_at, session_id),
+            "UPDATE ingestion_sessions SET status=?, report_json=?, updated_at=?, finished_at=? WHERE session_id=?",
+            (next_status, json_dumps(report if report is not None else session.get("report", {})), ts, finished, session_id),
         )
 
 
-# ---------------------------------------------------------------------------
-# Areas
-# ---------------------------------------------------------------------------
+# --- leaves ---
 
-def upsert_area(
-    session_id: str,
-    path: str | Path,
-    *,
-    parent_area_id: str | None = None,
-    depth: int = 0,
-    status: str = "unseen",
-    file_count: int = 0,
-    dir_count: int = 0,
-    signals: list[str] | None = None,
-    profile: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    init_db()
-    area_id = new_id("area")
-    ts = now_iso()
-    p = normalize_path(path)
-    with connect() as conn:
-        conn.execute(
-            """INSERT INTO areas (area_id, session_id, path, parent_area_id, depth, status,
-               file_count, dir_count, signals_json, profile_json, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(session_id, path) DO UPDATE SET
-               parent_area_id=COALESCE(excluded.parent_area_id, parent_area_id),
-               depth=excluded.depth, status=excluded.status,
-               file_count=excluded.file_count, dir_count=excluded.dir_count,
-               signals_json=excluded.signals_json, profile_json=excluded.profile_json,
-               updated_at=excluded.updated_at""",
-            (area_id, session_id, p, parent_area_id, depth, status,
-             file_count, dir_count, json_dumps(signals or []), json_dumps(profile or {}), ts, ts),
-        )
-        row = conn.execute("SELECT * FROM areas WHERE session_id=? AND path=?", (session_id, p)).fetchone()
-    return _row_to_area(row)
-
-
-def get_area(area_id: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM areas WHERE area_id=?", (area_id,)).fetchone()
-    return _row_to_area(row) if row else None
-
-
-def get_area_by_path(session_id: str, path: str | Path) -> dict[str, Any] | None:
+def upsert_leaf(session_id: str | None, path: str | Path, **fields: Any) -> dict[str, Any]:
     init_db()
     p = normalize_path(path)
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM areas WHERE session_id=? AND path=?", (session_id, p)).fetchone()
-    return _row_to_area(row) if row else None
-
-
-def list_areas(session_id: str, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
-    init_db()
-    sql = "SELECT * FROM areas WHERE session_id=?"
-    params: list[Any] = [session_id]
-    if status:
-        sql += " AND status=?"
-        params.append(status)
-    sql += " ORDER BY depth, path"
-    if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [_row_to_area(r) for r in rows]
-
-
-def update_area_status(area_id: str, status: str) -> None:
-    with connect() as conn:
-        conn.execute("UPDATE areas SET status=?, updated_at=? WHERE area_id=?", (status, now_iso(), area_id))
-
-
-def _row_to_area(row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["signals"] = json_loads(d.pop("signals_json"), [])
-    d["profile"] = json_loads(d.pop("profile_json"), {})
-    return d
-
-
-# ---------------------------------------------------------------------------
-# Evidence items
-# ---------------------------------------------------------------------------
-
-def add_evidence_item(
-    session_id: str,
-    area_id: str,
-    path: str | Path,
-    bucket: str,
-    *,
-    text_head: str | None = None,
-    extract_error: str | None = None,
-    weight: float = 1.0,
-    meta: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    init_db()
-    eid = new_id("ev")
+    parent = normalize_path(Path(p).parent)
     ts = now_iso()
+    existing = get_leaf_by_path(p)
+    if existing:
+        lid = existing["leaf_id"]
+        cols = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            cols.append(f"{k}=?")
+            vals.append(v)
+        cols.append("updated_at=?")
+        vals.append(ts)
+        vals.append(lid)
+        with connect() as conn:
+            conn.execute(f"UPDATE leaves SET {', '.join(cols)} WHERE leaf_id=?", vals)
+        return get_leaf(lid) or existing
+
+    lid = new_id("leaf")
+    row = {
+        "leaf_id": lid,
+        "session_id": session_id,
+        "path": p,
+        "parent_directory_path": parent,
+        "readable_status": fields.get("readable_status", "binary"),
+        "evidence_type": fields.get("evidence_type"),
+        "semantic_status": fields.get("semantic_status", "seed"),
+        "text_head": fields.get("text_head"),
+        "extract_error": fields.get("extract_error"),
+        "mtime": fields.get("mtime"),
+        "ctime": fields.get("ctime"),
+        "size": fields.get("size"),
+        "seed_source": fields.get("seed_source"),
+    }
     with connect() as conn:
         conn.execute(
-            """INSERT INTO evidence_items (evidence_id, session_id, area_id, path, bucket,
-               text_head, extract_error, weight, meta_json, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (eid, session_id, area_id, normalize_path(path), bucket,
-             text_head, extract_error, float(weight), json_dumps(meta or {}), ts),
+            """INSERT INTO leaves (leaf_id, session_id, path, parent_directory_path, readable_status,
+               evidence_type, semantic_status, text_head, extract_error, mtime, ctime, size, seed_source,
+               created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (lid, session_id, p, parent, row["readable_status"], row["evidence_type"], row["semantic_status"],
+             row["text_head"], row["extract_error"], row["mtime"], row["ctime"], row["size"], row["seed_source"], ts, ts),
         )
-    return {"evidence_id": eid, "session_id": session_id, "area_id": area_id,
-            "path": normalize_path(path), "bucket": bucket, "text_head": text_head,
-            "extract_error": extract_error, "weight": weight, "created_at": ts}
+    return get_leaf(lid) or row
 
 
-def list_evidence_items(session_id: str | None = None, area_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    init_db()
-    conditions = []
+def get_leaf(leaf_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM leaves WHERE leaf_id=?", (leaf_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_leaf_by_path(path: str | Path) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM leaves WHERE path=?", (normalize_path(path),)).fetchone()
+    return dict(row) if row else None
+
+
+def list_leaves(
+    session_id: str | None = None,
+    readable_status: str | None = None,
+    semantic_status: str | None = None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    conditions: list[str] = []
     params: list[Any] = []
     if session_id:
         conditions.append("session_id=?")
         params.append(session_id)
-    if area_id:
-        conditions.append("area_id=?")
-        params.append(area_id)
+    if readable_status:
+        conditions.append("readable_status=?")
+        params.append(readable_status)
+    if semantic_status:
+        conditions.append("semantic_status=?")
+        params.append(semantic_status)
     where = " AND ".join(conditions) if conditions else "1=1"
-    sql = f"SELECT * FROM evidence_items WHERE {where} ORDER BY weight DESC, created_at LIMIT ?"
     params.append(limit)
+    with connect() as conn:
+        rows = conn.execute(f"SELECT * FROM leaves WHERE {where} ORDER BY updated_at DESC LIMIT ?", params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def bump_leaf_counters(leaf_id: str, *, use: int = 0, reject: int = 0, confirm: int = 0) -> None:
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """UPDATE leaves SET use_count=use_count+?, reject_count=reject_count+?,
+               confirm_count=confirm_count+?, updated_at=? WHERE leaf_id=?""",
+            (use, reject, confirm, ts, leaf_id),
+        )
+
+
+def update_leaf_semantic_status(leaf_id: str, status: str) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE leaves SET semantic_status=?, updated_at=? WHERE leaf_id=?", (status, now_iso(), leaf_id))
+
+
+# --- semantic_tags ---
+
+def get_or_create_tag(tag: str, tag_type: str = "semantic") -> dict[str, Any]:
+    normalized = tag.strip().lower()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM semantic_tags WHERE tag=?", (normalized,)).fetchone()
+        if row:
+            return dict(row)
+        tid = new_id("tag")
+        ts = now_iso()
+        conn.execute(
+            "INSERT INTO semantic_tags (tag_id, tag, tag_type, created_at) VALUES (?,?,?,?)",
+            (tid, normalized, tag_type, ts),
+        )
+    return get_tag(tid) or {"tag_id": tid, "tag": normalized, "tag_type": tag_type}
+
+
+def get_tag(tag_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM semantic_tags WHERE tag_id=?", (tag_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_semantic_tag_if_unused(tag_id: str) -> None:
+    with connect() as conn:
+        used = conn.execute("SELECT 1 FROM leaf_tag_edges WHERE tag_id=? LIMIT 1", (tag_id,)).fetchone()
+        if not used:
+            conn.execute("DELETE FROM semantic_tags WHERE tag_id=?", (tag_id,))
+
+
+def list_tags(limit: int = 5000) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM semantic_tags ORDER BY tag LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- leaf_tag_edges ---
+
+def upsert_leaf_tag_edge(
+    leaf_id: str,
+    tag_id: str,
+    *,
+    weight: float = 1.0,
+    source: str = "llm",
+    evidence_note: str | None = None,
+) -> dict[str, Any]:
+    ts = now_iso()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT edge_id FROM leaf_tag_edges WHERE leaf_id=? AND tag_id=?", (leaf_id, tag_id)
+        ).fetchone()
+        if row:
+            eid = row["edge_id"]
+            conn.execute(
+                "UPDATE leaf_tag_edges SET weight=?, source=?, evidence_note=?, updated_at=? WHERE edge_id=?",
+                (weight, source, evidence_note, ts, eid),
+            )
+        else:
+            eid = new_id("lte")
+            conn.execute(
+                """INSERT INTO leaf_tag_edges (edge_id, leaf_id, tag_id, weight, source, evidence_note, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (eid, leaf_id, tag_id, weight, source, evidence_note, ts, ts),
+            )
+    return {"edge_id": eid, "leaf_id": leaf_id, "tag_id": tag_id, "weight": weight}
+
+
+def delete_leaf_tag_edge(edge_id: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM leaf_tag_edges WHERE edge_id=?", (edge_id,))
+
+
+def delete_semantic_tag_if_unused(tag_id: str) -> None:
+    if list_leaf_tag_edges(tag_id=tag_id):
+        return
+    with connect() as conn:
+        conn.execute("DELETE FROM semantic_tags WHERE tag_id=?", (tag_id,))
+
+
+def list_leaf_tag_edges(leaf_id: str | None = None, tag_id: str | None = None) -> list[dict[str, Any]]:
+    conditions: list[str] = []
+    params: list[Any] = []
+    if leaf_id:
+        conditions.append("leaf_id=?")
+        params.append(leaf_id)
+    if tag_id:
+        conditions.append("tag_id=?")
+        params.append(tag_id)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    with connect() as conn:
+        rows = conn.execute(f"SELECT * FROM leaf_tag_edges WHERE {where} ORDER BY weight DESC", params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def bump_leaf_tag_edge_weight(leaf_id: str, tag_id: str, delta: float) -> None:
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE leaf_tag_edges SET weight=MAX(0, weight+?), updated_at=? WHERE leaf_id=? AND tag_id=?",
+            (delta, ts, leaf_id, tag_id),
+        )
+
+
+# --- directory_nodes ---
+
+def upsert_directory_node(path: str | Path, **fields: Any) -> dict[str, Any]:
+    p = normalize_path(path)
+    ts = now_iso()
+    existing = get_directory_node_by_path(p)
+    if existing:
+        nid = existing["node_id"]
+        sets = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k == "org_signals":
+                sets.append("org_signals_json=?")
+                vals.append(json_dumps(v))
+            else:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        sets.append("updated_at=?")
+        vals.extend([ts, nid])
+        with connect() as conn:
+            conn.execute(f"UPDATE directory_nodes SET {', '.join(sets)} WHERE node_id=?", vals)
+        return get_directory_node(nid) or existing
+
+    nid = new_id("node")
+    depth = fields.get("depth", p.count("\\") + p.count("/"))
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO directory_nodes (node_id, path, parent_node_id, depth, node_type,
+               sampling_weight, compression_weight, activation_weight, org_signals_json,
+               readable_leaf_count, tagged_leaf_count, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (nid, p, fields.get("parent_node_id"), depth, fields.get("node_type", "container"),
+             fields.get("sampling_weight", 0), fields.get("compression_weight", 0),
+             fields.get("activation_weight", 0), json_dumps(fields.get("org_signals", [])),
+             fields.get("readable_leaf_count", 0), fields.get("tagged_leaf_count", 0), ts, ts),
+        )
+    return get_directory_node(nid) or {"node_id": nid, "path": p}
+
+
+def get_directory_node(node_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM directory_nodes WHERE node_id=?", (node_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["org_signals"] = json_loads(d.pop("org_signals_json"), [])
+    return d
+
+
+def get_directory_node_by_path(path: str | Path) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM directory_nodes WHERE path=?", (normalize_path(path),)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["org_signals"] = json_loads(d.pop("org_signals_json"), [])
+    return d
+
+
+def list_directory_nodes(node_type: str | None = None, limit: int = 5000) -> list[dict[str, Any]]:
+    if node_type:
+        sql = "SELECT * FROM directory_nodes WHERE node_type=? ORDER BY activation_weight DESC LIMIT ?"
+        params: tuple[Any, ...] = (node_type, limit)
+    else:
+        sql = "SELECT * FROM directory_nodes ORDER BY activation_weight DESC LIMIT ?"
+        params = (limit,)
     with connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     result = []
     for r in rows:
         d = dict(r)
-        d["meta"] = json_loads(d.pop("meta_json"), {})
+        d["org_signals"] = json_loads(d.pop("org_signals_json"), [])
         result.append(d)
     return result
 
 
-def get_evidence_item(evidence_id: str) -> dict[str, Any] | None:
-    init_db()
+def bump_node_activation(node_id: str, delta: float) -> None:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM evidence_items WHERE evidence_id=?", (evidence_id,)).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d["meta"] = json_loads(d.pop("meta_json"), {})
-    return d
+        conn.execute(
+            "UPDATE directory_nodes SET activation_weight=MAX(0, activation_weight+?), updated_at=? WHERE node_id=?",
+            (delta, now_iso(), node_id),
+        )
 
 
-# ---------------------------------------------------------------------------
-# File annotations
-# ---------------------------------------------------------------------------
+# --- directory_tag_edges ---
 
-def create_annotation(
+def upsert_directory_tag_edge(
+    node_id: str,
+    tag_id: str,
     *,
-    session_id: str | None = None,
-    evidence_id: str | None = None,
-    area_id: str | None = None,
-    path: str,
-    decision: str,
-    tags: list[str] | None = None,
-    value_reason: str | None = None,
-    evidence_summary: str | None = None,
-    confidence: float = 0.5,
+    weight: float,
+    edge_kind: str = "aggregated_semantic",
+    leaf_support_count: int = 0,
+    tagged_leaf_ratio: float = 0.0,
+    propagation_status: str = "local",
+    source_child_node_id: str | None = None,
 ) -> dict[str, Any]:
-    init_db()
-    aid = new_id("ann")
     ts = now_iso()
     with connect() as conn:
-        conn.execute(
-            """INSERT INTO file_annotations (annotation_id, session_id, evidence_id, area_id,
-               path, decision, tags_json, value_reason, evidence_summary, confidence,
-               use_count, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)""",
-            (aid, session_id, evidence_id, area_id, normalize_path(path), decision,
-             json_dumps(tags or []), value_reason, evidence_summary, float(confidence), ts, ts),
-        )
-    return get_annotation(aid) or {"annotation_id": aid}
+        row = conn.execute(
+            "SELECT edge_id FROM directory_tag_edges WHERE node_id=? AND tag_id=? AND edge_kind=?",
+            (node_id, tag_id, edge_kind),
+        ).fetchone()
+        if row:
+            eid = row["edge_id"]
+            conn.execute(
+                """UPDATE directory_tag_edges SET weight=?, leaf_support_count=?, tagged_leaf_ratio=?,
+                   propagation_status=?, source_child_node_id=?, updated_at=? WHERE edge_id=?""",
+                (weight, leaf_support_count, tagged_leaf_ratio, propagation_status, source_child_node_id, ts, eid),
+            )
+        else:
+            eid = new_id("dte")
+            conn.execute(
+                """INSERT INTO directory_tag_edges (edge_id, node_id, tag_id, weight, edge_kind,
+                   leaf_support_count, tagged_leaf_ratio, propagation_status, source_child_node_id, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (eid, node_id, tag_id, weight, edge_kind, leaf_support_count, tagged_leaf_ratio,
+                 propagation_status, source_child_node_id, ts, ts),
+            )
+    return {"edge_id": eid, "node_id": node_id, "tag_id": tag_id}
 
 
-def get_annotation(annotation_id: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM file_annotations WHERE annotation_id=?", (annotation_id,)).fetchone()
-    return _row_to_annotation(row) if row else None
-
-
-def list_annotations(
-    session_id: str | None = None,
-    area_id: str | None = None,
-    decision: str | None = None,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    init_db()
-    conditions = []
+def list_directory_tag_edges(node_id: str | None = None, tag_id: str | None = None) -> list[dict[str, Any]]:
+    conditions: list[str] = []
     params: list[Any] = []
-    if session_id:
-        conditions.append("session_id=?")
-        params.append(session_id)
-    if area_id:
-        conditions.append("area_id=?")
-        params.append(area_id)
-    if decision:
-        conditions.append("decision=?")
-        params.append(decision)
-    where = " AND ".join(conditions) if conditions else "1=1"
-    sql = f"SELECT * FROM file_annotations WHERE {where} ORDER BY confidence DESC, updated_at DESC"
-    if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [_row_to_annotation(r) for r in rows]
-
-
-def bump_annotation_use(annotation_id: str, delta: int = 1) -> None:
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            "UPDATE file_annotations SET use_count=use_count+?, updated_at=? WHERE annotation_id=?",
-            (delta, ts, annotation_id),
-        )
-
-
-def _row_to_annotation(row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["tags"] = json_loads(d.pop("tags_json"), [])
-    return d
-
-
-# ---------------------------------------------------------------------------
-# Route proposals
-# ---------------------------------------------------------------------------
-
-def create_proposal(
-    *,
-    session_id: str | None = None,
-    title: str,
-    brief: str,
-    supporting_annotation_ids: list[str],
-    anchor_path: str | None = None,
-    tags: list[str] | None = None,
-    meta: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    init_db()
-    pid = new_id("prop")
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            """INSERT INTO route_proposals (proposal_id, session_id, status, title, brief,
-               supporting_annotation_ids_json, anchor_path, tags_json, meta_json, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (pid, session_id, "proposed", title, brief,
-             json_dumps(supporting_annotation_ids), normalize_path(anchor_path) if anchor_path else None,
-             json_dumps(tags or []), json_dumps(meta or {}), ts, ts),
-        )
-    return get_proposal(pid) or {"proposal_id": pid}
-
-
-def get_proposal(proposal_id: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM route_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d["supporting_annotation_ids"] = json_loads(d.pop("supporting_annotation_ids_json"), [])
-    d["tags"] = json_loads(d.pop("tags_json"), [])
-    d["meta"] = json_loads(d.pop("meta_json"), {})
-    return d
-
-
-def list_proposals(session_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
-    init_db()
-    conditions = []
-    params: list[Any] = []
-    if session_id:
-        conditions.append("session_id=?")
-        params.append(session_id)
-    if status:
-        conditions.append("status=?")
-        params.append(status)
+    if node_id:
+        conditions.append("node_id=?")
+        params.append(node_id)
+    if tag_id:
+        conditions.append("tag_id=?")
+        params.append(tag_id)
     where = " AND ".join(conditions) if conditions else "1=1"
     with connect() as conn:
-        rows = conn.execute(f"SELECT * FROM route_proposals WHERE {where} ORDER BY created_at", params).fetchall()
-    results = []
-    for r in rows:
-        d = dict(r)
-        d["supporting_annotation_ids"] = json_loads(d.pop("supporting_annotation_ids_json"), [])
-        d["tags"] = json_loads(d.pop("tags_json"), [])
-        d["meta"] = json_loads(d.pop("meta_json"), {})
-        results.append(d)
-    return results
-
-
-def update_proposal_status(proposal_id: str, status: str) -> None:
-    with connect() as conn:
-        conn.execute("UPDATE route_proposals SET status=?, updated_at=? WHERE proposal_id=?", (status, now_iso(), proposal_id))
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-def create_route(
-    *,
-    title: str,
-    brief: str,
-    use_when: str | None = None,
-    anchor_path: str | None = None,
-    entrypoints: list[str] | None = None,
-    supporting_annotation_ids: list[str] | None = None,
-    tags: list[str] | None = None,
-    route_terms: list[str] | None = None,
-    route_meta: dict[str, Any] | None = None,
-    tier: str = "warm",
-    status: str = "active",
-    usage_verification: str = "seeded",
-    confidence: float = 0.5,
-    proposal_id: str | None = None,
-    source: str | None = None,
-) -> dict[str, Any]:
-    init_db()
-    rid = new_id("route")
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            """INSERT INTO routes (route_id, proposal_id, title, brief, use_when, anchor_path,
-               entrypoints_json, supporting_annotation_ids_json, tags_json, route_terms_json,
-               route_meta_json, tier, status, usage_verification, confidence,
-               quality_score, source, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (rid, proposal_id, title.strip(), brief.strip(), use_when,
-             normalize_path(anchor_path) if anchor_path else None,
-             json_dumps(entrypoints or []), json_dumps(supporting_annotation_ids or []),
-             json_dumps(tags or []), json_dumps(route_terms or []),
-             json_dumps(route_meta or {}), tier, status, usage_verification,
-             float(confidence), float(confidence), source, ts, ts),
-        )
-    return get_route(rid) or {"route_id": rid}
-
-
-def get_route(route_id: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM routes WHERE route_id=?", (route_id,)).fetchone()
-    return _row_to_route(row) if row else None
-
-
-def list_routes(status: str = "active") -> list[dict[str, Any]]:
-    init_db()
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM routes WHERE status=? ORDER BY tier, usage_score DESC, confidence DESC, updated_at DESC",
-            (status,),
-        ).fetchall()
-    return [_row_to_route(r) for r in rows]
-
-
-def bump_route(
-    route_id: str,
-    *,
-    usage_delta: float = 0,
-    risk_delta: float = 0,
-    confidence_delta: float = 0,
-    tier: str | None = None,
-    used: bool = False,
-) -> None:
-    route = get_route(route_id)
-    if not route:
-        return
-    ts = now_iso()
-    next_confidence = max(0.0, min(1.0, float(route["confidence"]) + confidence_delta))
-    next_tier = tier or route["tier"]
-    with connect() as conn:
-        conn.execute(
-            """UPDATE routes SET usage_score=usage_score+?, risk_score=MAX(0,risk_score+?),
-               confidence=?, tier=?, updated_at=?,
-               last_used=CASE WHEN ? THEN ? ELSE last_used END
-               WHERE route_id=?""",
-            (usage_delta, risk_delta, next_confidence, next_tier, ts, 1 if used else 0, ts, route_id),
-        )
-
-
-def set_route_tier(route_id: str, tier: str) -> None:
-    with connect() as conn:
-        conn.execute("UPDATE routes SET tier=?, updated_at=? WHERE route_id=?", (tier, now_iso(), route_id))
-
-
-def _row_to_route(row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["entrypoints"] = json_loads(d.pop("entrypoints_json"), [])
-    d["supporting_annotation_ids"] = json_loads(d.pop("supporting_annotation_ids_json"), [])
-    d["tags"] = json_loads(d.pop("tags_json"), [])
-    d["route_terms"] = json_loads(d.pop("route_terms_json"), [])
-    d["route_meta"] = json_loads(d.pop("route_meta_json"), {})
-    return d
-
-
-# ---------------------------------------------------------------------------
-# Deferred items
-# ---------------------------------------------------------------------------
-
-def create_deferred(
-    kind: str,
-    reason: str,
-    *,
-    area_id: str | None = None,
-    evidence_id: str | None = None,
-    annotation_id: str | None = None,
-) -> dict[str, Any]:
-    init_db()
-    did = new_id("defer")
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            """INSERT INTO deferred_items (deferred_id, kind, area_id, evidence_id, annotation_id,
-               reason, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (did, kind, area_id, evidence_id, annotation_id, reason, "pending", ts, ts),
-        )
-    return {"deferred_id": did, "kind": kind, "reason": reason, "status": "pending"}
-
-
-def list_deferred(status: str | None = "pending", limit: int = 200) -> list[dict[str, Any]]:
-    init_db()
-    if status:
-        sql = "SELECT * FROM deferred_items WHERE status=? ORDER BY created_at DESC LIMIT ?"
-        params: tuple[Any, ...] = (status, limit)
-    else:
-        sql = "SELECT * FROM deferred_items ORDER BY created_at DESC LIMIT ?"
-        params = (limit,)
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(f"SELECT * FROM directory_tag_edges WHERE {where} ORDER BY weight DESC", params).fetchall()
     return [dict(r) for r in rows]
 
 
-# ---------------------------------------------------------------------------
-# Task events
-# ---------------------------------------------------------------------------
+def bump_directory_tag_edge_weight(node_id: str, tag_id: str, edge_kind: str, delta: float) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE directory_tag_edges SET weight=MAX(0, weight+?), updated_at=? WHERE node_id=? AND tag_id=? AND edge_kind=?",
+            (delta, now_iso(), node_id, tag_id, edge_kind),
+        )
 
-def create_event(
-    event_type: str,
+
+# --- overview_entries ---
+
+def create_overview_entry(
+    node_id: str,
+    entry_type: str,
+    title: str,
+    brief: str,
     *,
-    query: str | None = None,
-    task_id: str | None = None,
-    route_ids: list[str] | None = None,
-    annotation_ids: list[str] | None = None,
-    paths: list[str] | None = None,
-    payload: dict[str, Any] | None = None,
+    supporting_leaf_ids: list[str],
+    supporting_tag_ids: list[str],
+    evidence_refs: list[dict[str, Any]],
+    activation_weight: float = 0.0,
 ) -> dict[str, Any]:
-    init_db()
-    eid = new_id("event")
+    eid = new_id("ov")
     ts = now_iso()
     with connect() as conn:
         conn.execute(
-            """INSERT INTO task_events (event_id, task_id, event_type, query, route_ids_json,
-               annotation_ids_json, paths_json, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (eid, task_id, event_type, query,
-             json_dumps(route_ids or []), json_dumps(annotation_ids or []),
-             json_dumps(paths or []), json_dumps(payload or {}), ts),
+            """INSERT INTO overview_entries (entry_id, node_id, entry_type, title, brief,
+               supporting_leaf_ids_json, supporting_tag_ids_json, evidence_refs_json,
+               activation_weight, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (eid, node_id, entry_type, title, brief, json_dumps(supporting_leaf_ids),
+             json_dumps(supporting_tag_ids), json_dumps(evidence_refs), activation_weight, ts, ts),
+        )
+    return get_overview_entry(eid) or {"entry_id": eid}
+
+
+def get_overview_entry(entry_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM overview_entries WHERE entry_id=?", (entry_id,)).fetchone()
+    if not row:
+        return None
+    return _row_overview(row)
+
+
+def list_overview_entries(limit: int = 100) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM overview_entries ORDER BY activation_weight DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_row_overview(r) for r in rows]
+
+
+def _row_overview(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["supporting_leaf_ids"] = json_loads(d.pop("supporting_leaf_ids_json"), [])
+    d["supporting_tag_ids"] = json_loads(d.pop("supporting_tag_ids_json"), [])
+    d["evidence_refs"] = json_loads(d.pop("evidence_refs_json"), [])
+    return d
+
+
+def clear_overview_entries() -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM overview_entries")
+
+
+# --- task_events ---
+
+def create_event(event_type: str, *, query: str | None = None, paths: list[str] | None = None, payload: dict | None = None) -> dict[str, Any]:
+    eid = new_id("evt")
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO task_events (event_id, event_type, query, paths_json, payload_json, created_at) VALUES (?,?,?,?,?,?)",
+            (eid, event_type, query, json_dumps(paths or []), json_dumps(payload or {}), ts),
         )
     return {"event_id": eid, "created_at": ts}
 
 
-def list_events(event_type: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    init_db()
-    if event_type:
-        sql = "SELECT * FROM task_events WHERE event_type=? ORDER BY created_at DESC LIMIT ?"
-        params: tuple[Any, ...] = (event_type, limit)
-    else:
-        sql = "SELECT * FROM task_events ORDER BY created_at DESC LIMIT ?"
-        params = (limit,)
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    results = []
-    for r in rows:
-        d = dict(r)
-        d["route_ids"] = json_loads(d.pop("route_ids_json"), [])
-        d["annotation_ids"] = json_loads(d.pop("annotation_ids_json"), [])
-        d["paths"] = json_loads(d.pop("paths_json"), [])
-        d["payload"] = json_loads(d.pop("payload_json"), {})
-        results.append(d)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Route query stats
-# ---------------------------------------------------------------------------
-
-def upsert_query_stats(route_id: str, query: str, *, positive: int = 0, negative: int = 0, note: str | None = None) -> None:
-    key = query_key(query)
-    ts = now_iso()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT notes_json FROM route_query_stats WHERE route_id=? AND query_key=?",
-            (route_id, key),
-        ).fetchone()
-        notes = json_loads(row["notes_json"], []) if row else []
-        if note:
-            notes.append({"at": ts, "note": note})
-        conn.execute(
-            """INSERT INTO route_query_stats (route_id, query_key, query, positive_count, negative_count,
-               last_positive, last_negative, notes_json) VALUES (?,?,?,?,?,?,?,?)
-               ON CONFLICT(route_id, query_key) DO UPDATE SET
-               positive_count=positive_count+excluded.positive_count,
-               negative_count=negative_count+excluded.negative_count,
-               last_positive=COALESCE(excluded.last_positive, last_positive),
-               last_negative=COALESCE(excluded.last_negative, last_negative),
-               notes_json=excluded.notes_json""",
-            (route_id, key, query, positive, negative,
-             ts if positive else None, ts if negative else None, json_dumps(notes)),
-        )
-
-
-def query_stats_for(route_id: str, query: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM route_query_stats WHERE route_id=? AND query_key=?",
-            (route_id, query_key(query)),
-        ).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d["notes"] = json_loads(d.pop("notes_json"), [])
-    return d
-
-
-def all_query_stats() -> list[dict[str, Any]]:
-    init_db()
-    with connect() as conn:
-        rows = conn.execute("SELECT * FROM route_query_stats ORDER BY negative_count DESC, positive_count DESC").fetchall()
-    results = []
-    for r in rows:
-        d = dict(r)
-        d["notes"] = json_loads(d.pop("notes_json"), [])
-        results.append(d)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Update plans
-# ---------------------------------------------------------------------------
-
-def create_update_plan(kind: str, *, query: str | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    init_db()
-    pid = new_id("plan")
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO update_plans (plan_id, kind, status, query, payload_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-            (pid, kind, "draft", query, json_dumps(payload or {}), ts, ts),
-        )
-    return get_update_plan(pid) or {"plan_id": pid}
-
-
-def get_update_plan(plan_id: str) -> dict[str, Any] | None:
-    init_db()
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM update_plans WHERE plan_id=?", (plan_id,)).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d["payload"] = json_loads(d.pop("payload_json"), {})
-    return d
-
-
-def list_update_plans(status: str | None = "draft", limit: int = 100) -> list[dict[str, Any]]:
-    init_db()
-    if status:
-        sql = "SELECT * FROM update_plans WHERE status=? ORDER BY created_at DESC LIMIT ?"
-        params: tuple[Any, ...] = (status, limit)
-    else:
-        sql = "SELECT * FROM update_plans ORDER BY created_at DESC LIMIT ?"
-        params = (limit,)
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    results = []
-    for r in rows:
-        d = dict(r)
-        d["payload"] = json_loads(d.pop("payload_json"), {})
-        results.append(d)
-    return results
-
-
-def mark_update_plan(plan_id: str, status: str) -> None:
-    ts = now_iso()
-    applied_at = ts if status == "applied" else None
-    with connect() as conn:
-        conn.execute(
-            "UPDATE update_plans SET status=?, updated_at=?, applied_at=COALESCE(?,applied_at) WHERE plan_id=?",
-            (status, ts, applied_at, plan_id),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Corrections
-# ---------------------------------------------------------------------------
-
-def create_correction(query: str, wrong_paths: list[str], missed_paths: list[str], note: str = "") -> dict[str, Any]:
-    init_db()
-    cid = new_id("correction")
-    ts = now_iso()
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO corrections (correction_id, query, wrong_paths_json, missed_paths_json, note, created_at) VALUES (?,?,?,?,?,?)",
-            (cid, query, json_dumps(wrong_paths), json_dumps(missed_paths), note, ts),
-        )
-    return {"correction_id": cid, "created_at": ts}
-
-
-# ---------------------------------------------------------------------------
-# Aggregate counts
-# ---------------------------------------------------------------------------
+# --- counts ---
 
 def lso_counts() -> dict[str, Any]:
-    init_db()
     with connect() as conn:
-        values: dict[str, Any] = {
-            "routes": conn.execute("SELECT COUNT(*) FROM routes WHERE status='active'").fetchone()[0],
-            "candidate_routes": conn.execute("SELECT COUNT(*) FROM routes WHERE status='candidate'").fetchone()[0],
-            "deferred_routes": conn.execute("SELECT COUNT(*) FROM routes WHERE status='deferred'").fetchone()[0],
-            "annotations": conn.execute("SELECT COUNT(*) FROM file_annotations").fetchone()[0],
-            "annotated": conn.execute("SELECT COUNT(*) FROM file_annotations WHERE decision='annotate'").fetchone()[0],
-            "evidence_items": conn.execute("SELECT COUNT(*) FROM evidence_items").fetchone()[0],
-            "areas": conn.execute("SELECT COUNT(*) FROM areas").fetchone()[0],
-            "events": conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0],
-            "draft_update_plans": conn.execute("SELECT COUNT(*) FROM update_plans WHERE status='draft'").fetchone()[0],
-            "corrections": conn.execute("SELECT COUNT(*) FROM corrections").fetchone()[0],
-            "deferred_items": conn.execute("SELECT COUNT(*) FROM deferred_items WHERE status='pending'").fetchone()[0],
-            "seed_sessions": conn.execute("SELECT COUNT(*) FROM seed_map_sessions").fetchone()[0],
+        return {
+            "leaves": conn.execute("SELECT COUNT(*) FROM leaves").fetchone()[0],
+            "readable_leaves": conn.execute("SELECT COUNT(*) FROM leaves WHERE readable_status='readable'").fetchone()[0],
+            "tagged_leaves": conn.execute("SELECT COUNT(*) FROM leaves WHERE semantic_status='tagged'").fetchone()[0],
+            "tags": conn.execute("SELECT COUNT(*) FROM semantic_tags").fetchone()[0],
+            "leaf_tag_edges": conn.execute("SELECT COUNT(*) FROM leaf_tag_edges").fetchone()[0],
+            "directory_nodes": conn.execute("SELECT COUNT(*) FROM directory_nodes").fetchone()[0],
+            "semantic_nodes": conn.execute("SELECT COUNT(*) FROM directory_nodes WHERE node_type='semantic_node'").fetchone()[0],
+            "overview_entries": conn.execute("SELECT COUNT(*) FROM overview_entries").fetchone()[0],
+            "db_path": str(config.DB_PATH),
         }
-        tiers = {
-            row["tier"]: row["c"]
-            for row in conn.execute("SELECT tier, COUNT(*) AS c FROM routes WHERE status='active' GROUP BY tier").fetchall()
-        }
-    values["tiers"] = tiers
-    values["db_path"] = str(config.DB_PATH)
-    return values
