@@ -1,8 +1,4 @@
-"""Reader / evidence gate for LSO substrate.
-
-Produces readable evidence (text_head) or read_status gates.
-No tags, nodes, scoring, or semantic judgment.
-"""
+"""Reader / evidence gate (core): readable evidence or mechanical read_status."""
 
 from __future__ import annotations
 
@@ -33,23 +29,19 @@ def looks_like_raw_dump(text: str) -> bool:
 
 
 def sanitize_display(text: str) -> str:
-    """Strip artifact-heavy lines; return safe excerpt or empty."""
     t = (text or "").strip()
     if not t or looks_like_raw_dump(t):
         return ""
-    lines = []
-    for line in t.splitlines():
-        line = line.strip()
-        if not line or RAW_ARTIFACT_RE.search(line):
-            continue
-        if line.startswith("<?xml") or "<w:" in line[:40]:
-            continue
-        lines.append(line)
+    lines = [
+        line.strip() for line in t.splitlines()
+        if line.strip() and not RAW_ARTIFACT_RE.search(line)
+        and not (line.strip().startswith("<?xml") or "<w:" in line[:40])
+    ]
     out = "\n".join(lines).strip()
     return "" if not out or looks_like_raw_dump(out) else out
 
 
-def _has_natural_or_tabular(text: str) -> bool:
+def _readable(text: str) -> bool:
     t = text.strip()
     return len(t) >= MIN_READABLE_CHARS and bool(
         _CJK_RE.search(t) or len(_WORD_RE.findall(t)) >= 2 or _TABULAR_RE.search(t[:1200])
@@ -61,13 +53,8 @@ def _read_bytes(path: Path) -> str:
         data = path.read_bytes()[: HEAD_MAX * 4]
     except OSError:
         return ""
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return data.decode("utf-16")[:HEAD_MAX]
-        except (UnicodeDecodeError, UnicodeError):
-            pass
-    if data[:200].count(b"\x00") > 20:
-        for enc in ("utf-16le", "utf-16be"):
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")) or data[:200].count(b"\x00") > 20:
+        for enc in ("utf-16", "utf-16le", "utf-16be"):
             try:
                 decoded = data.decode(enc)
             except (UnicodeDecodeError, UnicodeError):
@@ -88,61 +75,52 @@ def _ooxml(path: Path) -> str | None:
             if path.suffix.lower() == ".docx" and "word/document.xml" in zf.namelist():
                 root = ET.fromstring(zf.read("word/document.xml"))
                 ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                texts = [n.text for n in root.iter(f"{{{ns}}}t") if n.text]
-                s = " ".join(texts).strip()
+                s = " ".join(n.text for n in root.iter(f"{{{ns}}}t") if n.text).strip()
                 return s[:HEAD_MAX] if len(s) > 30 else None
             parts: list[str] = []
             for name in zf.namelist():
-                if name.endswith(".xml") and len(parts) < 400:
-                    try:
-                        root = ET.fromstring(zf.read(name))
-                        for e in root.iter():
-                            if e.text and e.text.strip():
-                                parts.append(e.text.strip())
-                    except ET.ParseError:
-                        pass
+                if not name.endswith(".xml") or len(parts) >= 400:
+                    continue
+                try:
+                    root = ET.fromstring(zf.read(name))
+                    for e in root.iter():
+                        if e.text and e.text.strip():
+                            parts.append(e.text.strip())
+                except ET.ParseError:
+                    pass
             s = " ".join(parts).strip()
             return s[:HEAD_MAX] if len(s) > 30 else None
     except (OSError, zipfile.BadZipFile, ET.ParseError):
         return None
 
 
-def _pdf_bytes(path: Path) -> str | None:
+def _binary_strings(path: Path) -> str | None:
     try:
         data = path.read_bytes()[:32000]
-        strings = re.findall(rb"[\x20-\x7e\xc0-\xff]{8,}", data)
+        pat = rb"[\x20-\x7e\xc0-\xff]{8,}" if path.suffix.lower() == ".pdf" else rb"[\x20-\x7e]{10,}"
+        strings = re.findall(pat, data)
         if not strings:
             return None
-        s = b" ".join(strings[:120]).decode("utf-8", errors="replace")
-        return s[:HEAD_MAX] if len(s) > 50 else None
-    except OSError:
-        return None
-
-
-def _legacy_office(path: Path) -> str | None:
-    try:
-        data = path.read_bytes()[:32000]
-        strings = re.findall(rb"[\x20-\x7e]{10,}", data)
-        s = " ".join(x.decode("ascii", errors="replace") for x in strings[:80]).strip()
-        return s[:HEAD_MAX] if len(s) > 50 else None
+        dec = "utf-8" if path.suffix.lower() == ".pdf" else "ascii"
+        s = b" ".join(strings[:120 if path.suffix.lower() == ".pdf" else 80]).decode(dec, errors="replace")
+        return s[:HEAD_MAX] if len(s) > (50 if path.suffix.lower() == ".pdf" else 50) else None
     except OSError:
         return None
 
 
 def _extract_raw(path: Path) -> str | None:
     suf = path.suffix.lower()
-    return (
-        _ooxml(path) if suf in (".docx", ".pptx", ".xlsx")
-        else _pdf_bytes(path) if suf == ".pdf"
-        else _legacy_office(path) if suf in (".doc", ".ppt", ".xls")
-        else _read_bytes(path)
-    )
+    if suf in (".docx", ".pptx", ".xlsx"):
+        return _ooxml(path)
+    if suf == ".pdf" or suf in (".doc", ".ppt", ".xls"):
+        return _binary_strings(path)
+    return _read_bytes(path)
 
 
 def _evidence_type(path: Path) -> str | None:
-    name_lower = path.name.lower()
-    if name_lower in MARKER_NAMES_LOWER or name_lower.startswith("readme"):
-        return "readme" if name_lower.startswith("readme") else "manifest"
+    name = path.name.lower()
+    if name in MARKER_NAMES_LOWER or name.startswith("readme"):
+        return "readme" if name.startswith("readme") else "manifest"
     suf = path.suffix.lower()
     if suf in TEXT_EXT:
         return "code_head" if suf in CODE_EXT else "text_head"
@@ -151,49 +129,38 @@ def _evidence_type(path: Path) -> str | None:
     return None
 
 
-def _in_ignore_dir(path: Path) -> bool:
-    return any(part.lower() in IGNORE_DIRS_LOWER for part in path.parts)
-
-
-def _stat_fields(path: Path) -> dict[str, float | int]:
+def _stat(path: Path) -> dict[str, float | int]:
     try:
         st = path.stat()
-        return {"mtime": st.st_mtime, "ctime": st.st_ctime, "size": st.st_size}
+        return {"mtime": st.st_mtime, "size": st.st_size}
     except OSError:
-        return {"mtime": 0.0, "ctime": 0.0, "size": 0}
+        return {"mtime": 0.0, "size": 0}
+
+
+def _gate(base: dict[str, Any], status: str, et: str | None = None) -> dict[str, Any]:
+    return {**base, "ok": True, "read_status": status, "text_head": None, "evidence_type": et}
 
 
 def read_leaf(path: str) -> dict[str, Any]:
-    """Extract readable evidence or return mechanical read_status gate."""
     p = Path(norm_path(path))
-    base: dict[str, Any] = {"path": str(p), **_stat_fields(p)}
+    base: dict[str, Any] = {"path": str(p), **_stat(p)}
 
-    if _in_ignore_dir(p):
-        return {**base, "ok": True, "read_status": "skipped_noise", "text_head": None, "evidence_type": None}
-
+    if any(part.lower() in IGNORE_DIRS_LOWER for part in p.parts):
+        return _gate(base, "skipped_noise")
     suf = p.suffix.lower()
     if suf in BINARY_EXT:
-        return {**base, "ok": True, "read_status": "binary", "text_head": None, "evidence_type": None}
-
+        return _gate(base, "binary")
     et = _evidence_type(p)
     if et is None and suf not in TEXT_EXT and suf not in OFFICE_EXT:
-        return {**base, "ok": True, "read_status": "binary", "text_head": None, "evidence_type": None}
+        return _gate(base, "binary")
 
     raw = _extract_raw(p)
     if not raw:
-        return {**base, "ok": True, "read_status": "extract_failed", "text_head": None, "evidence_type": et}
-
+        return _gate(base, "extract_failed", et)
     if looks_like_raw_dump(raw):
-        return {**base, "ok": True, "read_status": "skipped_noise", "text_head": None, "evidence_type": et}
+        return _gate(base, "skipped_noise", et)
 
     text_head = sanitize_display(raw)[:HEAD_MAX]
-    if not text_head or not _has_natural_or_tabular(text_head):
-        return {**base, "ok": True, "read_status": "skipped_noise", "text_head": None, "evidence_type": et}
-
-    return {
-        **base,
-        "ok": True,
-        "read_status": "readable",
-        "text_head": text_head,
-        "evidence_type": et,
-    }
+    if not text_head or not _readable(text_head):
+        return _gate(base, "skipped_noise", et)
+    return {**base, "ok": True, "read_status": "readable", "text_head": text_head, "evidence_type": et}

@@ -1,6 +1,6 @@
 """Mechanical config — environment hygiene, not semantic rules.
 
-Shared constants for read / search / store / build / runtime.
+Shared constants for read / search / overlay / navigate.
 Nothing here may generate tags, nodes, or semantic judgments.
 """
 
@@ -73,3 +73,14 @@ GLOBAL_MEM_PATH = Path(__file__).resolve().parent.parent / "global_mem.txt"
 DEFAULT_TIMEOUT = 30.0
 PROBE_TIMEOUT = 8.0
 ES_ENV_KEYS = ("EVERYTHING_ES_EXE", "GA_ES_EXE", "FILE_INDEX_ES_EXE")
+
+# --- mechanical tag filtering (not semantic rules) ---
+
+GENERIC_TAG_STOPWORDS = frozenset({
+    "file", "files", "folder", "document", "project", "data", "misc", "general", "code", "archive",
+    "pdf", "doc", "ppt", "txt", "md", "json", "xml", "csv",
+    "文件", "目录", "项目", "文档", "资料", "材料",
+})
+
+SIZE_CAP_BYTES = 5_000_000
+RECENT_DAYS = 14
