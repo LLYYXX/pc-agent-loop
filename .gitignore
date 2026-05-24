@@ -47,6 +47,8 @@ memory/*
 # LSO Slim (package tracked; per-scope overlay JSON stays local)
 !memory/local_semantic_overlay_overview.md
 !memory/local_semantic_overlay_sop.md
+!memory/local_semantic_overlay_reference.md
+!memory/local_semantic_overlay_ablation.md
 !memory/local_semantic_overlay/
 !memory/local_semantic_overlay/**
 memory/local_semantic_overlay/overlays/*

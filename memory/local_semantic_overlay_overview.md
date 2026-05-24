@@ -1,7 +1,7 @@
 # 本地语义覆盖层（LSO）— 设计说明
 
 > 面向人类读者：解释 LSO 是什么、解决什么问题、边界在哪。  
-> Agent 如何调用见 [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md)。
+> Agent 如何调用见 [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md)（按需 [`reference`](local_semantic_overlay_reference.md)）。
 
 ---
 
@@ -101,7 +101,7 @@ Slim Core 规模约束已收敛（减码后）。
 ```
 
 当前实现已完成消融边界版重写，**30 项结构测试全部通过**。  
-按对齐稿 core 口径统计（`read` + `select` + `overlay` + `navigate` + public API），减码后 **897 行**，低于 1000 行约束并保留约 **100 行缓冲**（供 dedup 测试、lineage cleanup、runner 指标、Windows/es smoke 等后续补全）。  
+按对齐稿 core 口径统计（`read` + `select` + `overlay` + `navigate` + public API），减码后 **897 行**，低于 1000 行约束并保留约 **100 行缓冲**（供 dedup 测试、lineage cleanup、ablation benchmark 指标、Windows/es smoke 等后续补全）。  
 **可消融 ≠ 不计行数**——证据管线可关开关做实验，但 `read.py` 仍计入 core，不能当 substrate 从预算里拿掉。
 
 下一步：**不新增能力**，先跑 A/B/C 消融实验；再据结果决定是否加能力。
@@ -110,7 +110,7 @@ Slim Core 规模约束已收敛（减码后）。
 
 ## 规模与范围
 
-**行数口径（与 §2.2 对齐）**：计入 Slim core 的是所有生成或维护 tag / semantic node / overlay state、以及 evidence extraction / raw dump gate 的代码；**不计入**的只有搜索适配（`search.py`）和实验 harness（`experiments/lso/runner.py`）。
+**行数口径（与 §2.2 对齐）**：计入 Slim core 的是所有生成或维护 tag / semantic node / overlay state、以及 evidence extraction / raw dump gate 的代码；**不计入**的只有搜索适配（`search.py`）和实验 harness（`experiments/lso/ablation_benchmark.py`）。
 
 | 模块 | 行数 | 计入 core |
 |------|------|-----------|
@@ -122,7 +122,7 @@ Slim Core 规模约束已收敛（减码后）。
 | **core 合计** | **897** | **≤1000，缓冲 ~103 行** |
 | `search.py` | 251 | 否（substrate） |
 | `_config.py` | 86 | 否（机械配置，与 search 共享） |
-| `experiments/lso/runner.py` | 114 | 否（harness） |
+| `experiments/lso/ablation_benchmark.py` | 114 | 否（harness） |
 
 当前是 **Slim** 版：词面匹配查询，无 embedding、无任务级推理。
 
@@ -133,5 +133,7 @@ Slim Core 规模约束已收敛（减码后）。
 | 文件 | 读者 |
 |------|------|
 | 本文 | 人：设计意图、对象、边界、约束 |
-| [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md) | Agent：import、逐步调用、返回值、禁止项 |
+| [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md) | Agent 日常：Build / Runtime、禁止项 |
+| [`local_semantic_overlay_reference.md`](local_semantic_overlay_reference.md) | Agent 按需：可选能力、返回值、完整 import |
+| [`local_semantic_overlay_ablation.md`](local_semantic_overlay_ablation.md) | 人/实验：A/B/C 消融（**不给日常 Agent**） |
 | `memory/local_semantic_overlay/` | 实现源码 |

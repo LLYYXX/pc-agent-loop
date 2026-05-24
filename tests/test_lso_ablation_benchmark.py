@@ -9,15 +9,15 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-RUNNER = REPO / "experiments" / "lso" / "runner.py"
+BENCHMARK = REPO / "experiments" / "lso" / "ablation_benchmark.py"
 
 
-class LsoRunnerTests(unittest.TestCase):
-    def test_runner_outputs_json_for_mode_c(self):
+class LsoAblationBenchmarkTests(unittest.TestCase):
+    def test_benchmark_outputs_json_for_mode_c(self):
         with tempfile.TemporaryDirectory() as td:
             Path(td, "a.md").write_text("Experiment evidence about sensors and routing.\n", encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, str(RUNNER), "--mode", "C", "--scope", td],
+                [sys.executable, str(BENCHMARK), "--mode", "C", "--scope", td],
                 capture_output=True, text=True, check=True,
             )
             report = json.loads(proc.stdout)
@@ -29,7 +29,7 @@ class LsoRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             Path(td, "b.md").write_text("Ablation passthrough evidence content.\n", encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, str(RUNNER), "--mode", "C", "--scope", td, "--ablate", "no_selection"],
+                [sys.executable, str(BENCHMARK), "--mode", "C", "--scope", td, "--ablate", "no_selection"],
                 capture_output=True, text=True, check=True,
             )
             report = json.loads(proc.stdout)

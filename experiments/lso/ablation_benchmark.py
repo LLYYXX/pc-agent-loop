@@ -1,4 +1,4 @@
-"""LSO A/B/C experiment runner — outside semantic core (ablation boundary B5)."""
+"""LSO A/B/C ablation benchmark — outside semantic core (boundary B5)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 REPO = Path(__file__).resolve().parents[2]
 MEMORY = REPO / "memory"
@@ -91,19 +90,17 @@ def run_experiment(mode: str, scope: str | None = None, *, ablations: list[str] 
         td = tempfile.TemporaryDirectory()
         scope = td.name
         Path(scope, "sample.md").write_text("Experiment fixture evidence about routing sensors.\n", encoding="utf-8")
-    metrics = _run_flow(scope, mode.upper(), ablations=ablations)
-    return asdict(metrics)
+    return asdict(_run_flow(scope, mode.upper(), ablations=ablations))
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="LSO A/B/C experiment runner")
+    ap = argparse.ArgumentParser(description="LSO A/B/C ablation benchmark")
     ap.add_argument("--mode", choices=["A", "B", "C"], default="C")
     ap.add_argument("--scope", default=None, help="fixture scope directory")
     ap.add_argument("--ablate", action="append", default=[], help="ablation flag, repeatable")
     ap.add_argument("--out", default="-", help="JSON output path or - for stdout")
     args = ap.parse_args()
-    report = run_experiment(args.mode, args.scope, ablations=args.ablate)
-    text = json.dumps(report, ensure_ascii=False, indent=2)
+    text = json.dumps(run_experiment(args.mode, args.scope, ablations=args.ablate), ensure_ascii=False, indent=2)
     if args.out == "-":
         print(text)
     else:
