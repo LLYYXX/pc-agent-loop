@@ -12,6 +12,7 @@ MEMORY_ROOT = REPO_ROOT / "memory"
 if str(MEMORY_ROOT) not in sys.path:
     sys.path.insert(0, str(MEMORY_ROOT))
 
+import local_semantic_overlay as lso
 from local_semantic_overlay import overlay as ov
 from local_semantic_overlay.overlay import OverlayFlags
 
@@ -33,10 +34,18 @@ class LsoOverlayTests(unittest.TestCase):
         p.write_text(text, encoding="utf-8")
         return str(p)
 
+    def _tag(self, leaf_id: str, tag: str, evidence: str, flags: OverlayFlags | None = None) -> dict:
+        return ov.propose_leaf_tags(self.scope, leaf_id, [{
+            "tag": tag,
+            "evidence_phrase": evidence,
+            "evidence_source": "text_head",
+            "tag_role": "content_semantic",
+        }], flags=flags)
+
     def test_leaf_tag_and_apply_node(self):
         path = self._write("a.md", "Alpha evidence about routing tables and deployment.\n")
         _, lid = ov.ensure_leaf(self.scope, path)
-        ov.apply_leaf_tags(self.scope, lid, ["routing tables", "md"])
+        self.assertTrue(self._tag(lid, "routing tables", "routing tables")["ok"])
         self.assertEqual(ov.load(self.scope)["leaves"][lid]["semantic_tags"], ["routing tables"])
 
         node = {
@@ -77,8 +86,8 @@ class LsoOverlayTests(unittest.TestCase):
         p2 = self._write("p2.md", "Policy gradient methods for robotic benchmarks.\n")
         _, l1 = ov.ensure_leaf(self.scope, p1)
         _, l2 = ov.ensure_leaf(self.scope, p2)
-        ov.apply_leaf_tags(self.scope, l1, ["policy gradients"])
-        ov.apply_leaf_tags(self.scope, l2, ["policy gradients"])
+        self.assertTrue(self._tag(l1, "policy gradients", "Policy gradients")["ok"])
+        self.assertTrue(self._tag(l2, "policy gradients", "Policy gradient")["ok"])
         agg = ov.apply_aggregation(self.scope, {
             "decision": "aggregate", "label": "PG research", "tags": ["policy gradients"],
             "derived_from_ids": [l1, l2], "brief": "Policy gradients for control tasks",
@@ -94,13 +103,13 @@ class LsoOverlayTests(unittest.TestCase):
         path = self._write("c.md", "Gamma readable evidence for flag disable test.\n")
         _, lid = ov.ensure_leaf(self.scope, path)
         off = OverlayFlags(enable_leaf_tags=False)
-        self.assertFalse(ov.apply_leaf_tags(self.scope, lid, ["gamma"], flags=off)["ok"])
+        self.assertFalse(self._tag(lid, "gamma", "Gamma", flags=off)["ok"])
 
     def test_explicit_feedback_only(self):
         path = self._write("d.md", "Delta readable evidence for feedback recording.\n")
         _, lid = ov.ensure_leaf(self.scope, path)
-        ov.apply_leaf_tags(self.scope, lid, ["delta evidence"])
-        self.assertTrue(ov.record_feedback(self.scope, result_id="r1", kind="selected", leaf_id=lid)["ok"])
+        self.assertTrue(self._tag(lid, "delta evidence", "Delta readable evidence")["ok"])
+        self.assertTrue(lso.record_feedback(self.scope, result_id="r1", kind="selected", leaf_id=lid)["ok"])
         self.assertEqual(len(ov.load(self.scope)["feedback"]), 1)
 
     def test_active_budget_demotion_respects_flag(self):
@@ -118,7 +127,7 @@ class LsoOverlayTests(unittest.TestCase):
         data["meta"]["active_budget"] = 1
         ov.save(data)
         off = OverlayFlags(enable_active_cold=False)
-        res = ov.enforce_active_budget(self.scope, flags=off)
+        res = lso.enforce_active_budget(self.scope, flags=off)
         self.assertTrue(res.get("skipped"))
         active = [n for n in ov.load(self.scope)["nodes"].values() if n.get("status") == "active"]
         self.assertEqual(len(active), 3)

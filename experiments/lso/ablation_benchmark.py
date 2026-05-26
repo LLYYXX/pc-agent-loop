@@ -73,8 +73,14 @@ def _run_flow(scope: str, mode: str, *, ablations: list[str]) -> RunMetrics:
             m.overlay_writes += 1
             if ov_flags.enable_leaf_tags and rr.get("read_status") == "readable":
                 lid = ov.leaf_id_for_path(row["path"])
-                ov.apply_leaf_tags(scope, lid, ["evidence token"], flags=ov_flags)
-                m.overlay_writes += 1
+                res = ov.propose_leaf_tags(scope, lid, [{
+                    "tag": "evidence token",
+                    "evidence_phrase": "evidence",
+                    "evidence_source": "text_head",
+                    "tag_role": "content_semantic",
+                }], flags=ov_flags)
+                if res["ok"]:
+                    m.overlay_writes += 1
 
     if use_overlay:
         result = query(scope, "evidence", flags=nav_flags)

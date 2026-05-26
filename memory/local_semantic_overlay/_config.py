@@ -10,7 +10,6 @@ import os
 import re
 from pathlib import Path
 
-# --- path utilities ---
 
 def norm_path(path: str | os.PathLike[str]) -> str:
     return os.path.normpath(os.path.abspath(str(path).strip().strip('"').strip("'")))
@@ -24,6 +23,11 @@ def path_eq(a: str, b: str) -> bool:
 
 def anchor_of(path: str) -> str:
     return norm_path(os.path.dirname(path))
+
+
+def normalize_label(text: str) -> str:
+    s = re.sub(r"[^\w\u4e00-\u9fff ]+", "", re.sub(r"[\s_\-]+", " ", (text or "").strip().lower()))
+    return s.strip()
 
 
 # --- evidence extraction ---
@@ -73,14 +77,6 @@ GLOBAL_MEM_PATH = Path(__file__).resolve().parent.parent / "global_mem.txt"
 DEFAULT_TIMEOUT = 30.0
 PROBE_TIMEOUT = 8.0
 ES_ENV_KEYS = ("EVERYTHING_ES_EXE", "GA_ES_EXE", "FILE_INDEX_ES_EXE")
-
-# --- mechanical tag filtering (not semantic rules) ---
-
-GENERIC_TAG_STOPWORDS = frozenset({
-    "file", "files", "folder", "document", "project", "data", "misc", "general", "code", "archive",
-    "pdf", "doc", "ppt", "txt", "md", "json", "xml", "csv",
-    "文件", "目录", "项目", "文档", "资料", "材料",
-})
 
 SIZE_CAP_BYTES = 5_000_000
 RECENT_DAYS = 14

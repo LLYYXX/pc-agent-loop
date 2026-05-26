@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,25 +14,37 @@ from ._config import (
     OFFICE_EXT, RECENT_DAYS, SIZE_CAP_BYTES, TEXT_EXT, norm_path,
 )
 
-
 @dataclass
 class EvidenceFlags:
     enable_selection: bool = True
 
+def _filename_signal(pp: Path) -> bool:
+    stem = pp.stem.strip()
+    compact = re.sub(r"[\W_]+", "", stem, flags=re.UNICODE)
+    if len(compact) < 4:
+        return False
+    return bool(
+        re.search(r"[\u4e00-\u9fff]{4,}", stem)
+        or re.search(r"[A-Za-z][A-Za-z0-9_\-]{3,}", stem)
+    )
 
-def _eligible(p: str, size_cap: int) -> bool:
+
+def _candidate_kind(p: str, size_cap: int) -> str | None:
     pp = Path(p)
     if not os.path.isfile(p) or any(x.lower() in IGNORE_DIRS_LOWER for x in pp.parts):
-        return False
-    if pp.suffix.lower() in BINARY_EXT:
-        return False
+        return None
     try:
-        return pp.stat().st_size <= size_cap
+        if pp.stat().st_size > size_cap:
+            return None
     except OSError:
-        return False
+        return None
+    if pp.suffix.lower() in BINARY_EXT:
+        return "filename_only" if _filename_signal(pp) else None
+    return "content"
 
-
-def _classify(pp: Path, *, user: bool, fb: bool, recent_cut: float) -> tuple[int, str]:
+def _classify(pp: Path, *, user: bool, fb: bool, recent_cut: float, kind: str) -> tuple[int, str]:
+    if kind == "filename_only":
+        return (0 if user or fb else 6), "filename_only"
     if user:
         return 0, "user_confirmed"
     if fb:
@@ -53,7 +66,6 @@ def _classify(pp: Path, *, user: bool, fb: bool, recent_cut: float) -> tuple[int
     except OSError:
         pass
     return pri, reason
-
 
 def select_for_read(
     paths: list[str],
@@ -84,9 +96,10 @@ def select_for_read(
     recent_cut = time.time() - recent_days * 86400
     rows: list[tuple[int, str, str]] = []
     for p in list(seeds_n) + list(fb_n - seeds_n) + [x for x in normed if x not in seeds_n and x not in fb_n]:
-        if not _eligible(p, size_cap):
+        kind = _candidate_kind(p, size_cap)
+        if not kind:
             continue
-        pri, reason = _classify(Path(p), user=p in seeds_n, fb=p in fb_n, recent_cut=recent_cut)
+        pri, reason = _classify(Path(p), user=p in seeds_n, fb=p in fb_n, recent_cut=recent_cut, kind=kind)
         rows.append((pri, p, reason))
 
     rows.sort(key=lambda x: (x[0], -os.path.getmtime(x[1]) if os.path.isfile(x[1]) else 0))

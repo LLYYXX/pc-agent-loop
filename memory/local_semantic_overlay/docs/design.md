@@ -1,7 +1,7 @@
 # 本地语义覆盖层（LSO）— 设计说明
 
 > 面向人类读者：解释 LSO 是什么、解决什么问题、边界在哪。  
-> Agent 如何调用见 [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md)（按需 [`reference`](local_semantic_overlay_reference.md)）。
+> Agent 日常调用入口见 [`../../local_semantic_overlay_sop.md`](../../local_semantic_overlay_sop.md)。
 
 ---
 
@@ -133,7 +133,6 @@ Slim Core 规模约束已收敛（减码后）。
 | 文件 | 读者 |
 |------|------|
 | 本文 | 人：设计意图、对象、边界、约束 |
-| [`local_semantic_overlay_sop.md`](local_semantic_overlay_sop.md) | Agent 日常：Build / Runtime、禁止项 |
-| [`local_semantic_overlay_reference.md`](local_semantic_overlay_reference.md) | Agent 按需：可选能力、返回值、完整 import |
-| [`local_semantic_overlay_ablation.md`](local_semantic_overlay_ablation.md) | 人/实验：A/B/C 消融（**不给日常 Agent**） |
+| [`../../local_semantic_overlay_sop.md`](../../local_semantic_overlay_sop.md) | Agent 日常入口：SOP + API reference |
+| [`ablation.md`](ablation.md) | 人/实验：A/B/C 消融（**不给日常 Agent**） |
 | `memory/local_semantic_overlay/` | 实现源码 |

@@ -18,7 +18,6 @@ _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
 _TABULAR_RE = re.compile(r"[,|\t].*[,|\t]|^\s*[\w\u4e00-\u9fff]+\s*[:：]\s*\S", re.M)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-
 def looks_like_raw_dump(text: str) -> bool:
     t = (text or "").strip()
     head = t[:800]
@@ -26,7 +25,6 @@ def looks_like_raw_dump(text: str) -> bool:
         not t or RAW_ARTIFACT_RE.search(head) or "<w:" in t[:120]
         or _CONTROL_RE.search(head) or head.count("\ufffd") > max(8, len(head) // 20)
     )
-
 
 def sanitize_display(text: str) -> str:
     t = (text or "").strip()
@@ -40,13 +38,11 @@ def sanitize_display(text: str) -> str:
     out = "\n".join(lines).strip()
     return "" if not out or looks_like_raw_dump(out) else out
 
-
 def _readable(text: str) -> bool:
     t = text.strip()
     return len(t) >= MIN_READABLE_CHARS and bool(
         _CJK_RE.search(t) or len(_WORD_RE.findall(t)) >= 2 or _TABULAR_RE.search(t[:1200])
     )
-
 
 def _read_bytes(path: Path) -> str:
     try:
@@ -67,7 +63,6 @@ def _read_bytes(path: Path) -> str:
         except (UnicodeDecodeError, UnicodeError):
             continue
     return data.decode("utf-8", errors="replace")[:HEAD_MAX]
-
 
 def _ooxml(path: Path) -> str | None:
     try:
@@ -93,7 +88,6 @@ def _ooxml(path: Path) -> str | None:
     except (OSError, zipfile.BadZipFile, ET.ParseError):
         return None
 
-
 def _binary_strings(path: Path) -> str | None:
     try:
         data = path.read_bytes()[:32000]
@@ -107,7 +101,6 @@ def _binary_strings(path: Path) -> str | None:
     except OSError:
         return None
 
-
 def _extract_raw(path: Path) -> str | None:
     suf = path.suffix.lower()
     if suf in (".docx", ".pptx", ".xlsx"):
@@ -115,7 +108,6 @@ def _extract_raw(path: Path) -> str | None:
     if suf == ".pdf" or suf in (".doc", ".ppt", ".xls"):
         return _binary_strings(path)
     return _read_bytes(path)
-
 
 def _evidence_type(path: Path) -> str | None:
     name = path.name.lower()
@@ -128,7 +120,6 @@ def _evidence_type(path: Path) -> str | None:
         return "pdf_head" if suf == ".pdf" else "office_head"
     return None
 
-
 def _stat(path: Path) -> dict[str, float | int]:
     try:
         st = path.stat()
@@ -136,15 +127,12 @@ def _stat(path: Path) -> dict[str, float | int]:
     except OSError:
         return {"mtime": 0.0, "size": 0}
 
-
 def _gate(base: dict[str, Any], status: str, et: str | None = None) -> dict[str, Any]:
     return {**base, "ok": True, "read_status": status, "text_head": None, "evidence_type": et}
-
 
 def read_leaf(path: str) -> dict[str, Any]:
     p = Path(norm_path(path))
     base: dict[str, Any] = {"path": str(p), **_stat(p)}
-
     if any(part.lower() in IGNORE_DIRS_LOWER for part in p.parts):
         return _gate(base, "skipped_noise")
     suf = p.suffix.lower()
@@ -153,13 +141,11 @@ def read_leaf(path: str) -> dict[str, Any]:
     et = _evidence_type(p)
     if et is None and suf not in TEXT_EXT and suf not in OFFICE_EXT:
         return _gate(base, "binary")
-
     raw = _extract_raw(p)
     if not raw:
         return _gate(base, "extract_failed", et)
     if looks_like_raw_dump(raw):
         return _gate(base, "skipped_noise", et)
-
     text_head = sanitize_display(raw)[:HEAD_MAX]
     if not text_head or not _readable(text_head):
         return _gate(base, "skipped_noise", et)

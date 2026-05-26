@@ -30,13 +30,41 @@ class LsoNavigateTests(unittest.TestCase):
     def test_empty_query_no_hits(self):
         self.assertEqual(query(self.scope, "")["hits"], [])
 
+    def _tag(self, leaf_id: str, tag: str, evidence: str) -> None:
+        res = ov.propose_leaf_tags(self.scope, leaf_id, [{
+            "tag": tag,
+            "evidence_phrase": evidence,
+            "evidence_source": "text_head",
+            "tag_role": "content_semantic",
+        }])
+        self.assertTrue(res["ok"])
+
     def test_leaf_tag_hit(self):
         p = Path(self.scope) / "a.md"
         p.write_text("Navigate test evidence about sensors and routing.\n", encoding="utf-8")
         _, lid = ov.ensure_leaf(self.scope, str(p))
-        ov.apply_leaf_tags(self.scope, lid, ["sensors"])
+        self._tag(lid, "sensors", "sensors")
         hits = query(self.scope, "sensors")["hits"]
         self.assertTrue(any(h["hit_type"] == "leaf_tag" for h in hits))
+        self.assertEqual(hits[0]["match_reasons"][0]["channel"], "semantic_tags")
+
+    def test_filename_hint_hit_is_not_leaf_tag(self):
+        p = Path(self.scope) / "project-review.bin"
+        p.write_bytes(b"\x00\x01\x02")
+        ov.ensure_leaf(self.scope, str(p))
+        hits = query(self.scope, "project-review")["hits"]
+        self.assertEqual(hits[0]["hit_type"], "filename_hint")
+        self.assertEqual(hits[0]["match_reasons"][0]["channel"], "filename_hint")
+        self.assertEqual(hits[0]["semantic_tags"], [])
+
+    def test_metadata_hit_reports_channel(self):
+        p = Path(self.scope) / "note.md"
+        p.write_text("Readable evidence about payment review.\n", encoding="utf-8")
+        _, lid = ov.ensure_leaf(self.scope, str(p))
+        ov.propose_leaf_tags(self.scope, lid, [{"tag": "source-chat", "tag_role": "source_channel"}])
+        hits = query(self.scope, "source-chat")["hits"]
+        self.assertEqual(hits[0]["hit_type"], "metadata")
+        self.assertEqual(hits[0]["match_reasons"][0]["channel"], "source_channel")
 
     def test_fallback_source_labeled(self):
         with mock.patch("local_semantic_overlay.navigate.lso_search.search_rows") as sr:
@@ -48,7 +76,7 @@ class LsoNavigateTests(unittest.TestCase):
         p = Path(self.scope) / "a.md"
         p.write_text("Semantic off test with unique token foobarzz.\n", encoding="utf-8")
         _, lid = ov.ensure_leaf(self.scope, str(p))
-        ov.apply_leaf_tags(self.scope, lid, ["foobarzz"])
+        self._tag(lid, "foobarzz", "foobarzz")
         off = NavigateFlags(enable_semantic=False)
         hits = query(self.scope, "foobarzz", flags=off)["hits"]
         self.assertFalse(any(h["hit_type"] == "semantic_node" for h in hits))
@@ -57,7 +85,7 @@ class LsoNavigateTests(unittest.TestCase):
         p = Path(self.scope) / "cold.md"
         p.write_text("Cold node evidence about thermal control systems.\n", encoding="utf-8")
         _, lid = ov.ensure_leaf(self.scope, str(p))
-        ov.apply_leaf_tags(self.scope, lid, ["thermal control"])
+        self._tag(lid, "thermal control", "thermal control")
         node = {
             "label": "Thermal", "semantic_tags": ["thermal control"], "source": "compressed",
             "supporting_leaf_ids": [lid], "brief": "Cold node evidence about thermal control",

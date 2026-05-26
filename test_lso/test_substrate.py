@@ -13,7 +13,7 @@ MEMORY_ROOT = REPO_ROOT / "memory"
 if str(MEMORY_ROOT) not in sys.path:
     sys.path.insert(0, str(MEMORY_ROOT))
 
-from local_semantic_overlay import read_leaf
+from local_semantic_overlay.read import read_leaf
 from local_semantic_overlay import search as lso_search
 from local_semantic_overlay.read import looks_like_raw_dump, sanitize_display
 

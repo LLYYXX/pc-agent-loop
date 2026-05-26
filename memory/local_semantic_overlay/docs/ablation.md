@@ -1,7 +1,7 @@
 # LSO 消融实验说明
 
 > **不给日常 Agent**。用于 A/B/C 对比与 `--ablate` 开关验证。  
-> 设计背景见 [`local_semantic_overlay_overview.md`](local_semantic_overlay_overview.md)。
+> 设计背景见 [`design.md`](design.md)。
 
 ---
 

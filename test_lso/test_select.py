@@ -38,6 +38,21 @@ class LsoSelectTests(unittest.TestCase):
             rows = select_for_read([], seeds=[str(p)])
         self.assertEqual(rows[0]["reason"], "user_confirmed")
 
+    def test_binary_with_filename_signal_selected_as_filename_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "项目结题报告.bin"
+            p.write_bytes(b"\x00\x01\x02")
+            rows = select_for_read([str(p)])
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["reason"], "filename_only")
+
+    def test_binary_without_filename_signal_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.bin"
+            p.write_bytes(b"\x00\x01\x02")
+            rows = select_for_read([str(p)])
+        self.assertEqual(rows, [])
+
     def test_selection_disabled_passthrough(self):
         with tempfile.TemporaryDirectory() as td:
             a = Path(td) / "a.txt"
