@@ -8,6 +8,21 @@ from .rules_util import audio_id, iter_must_rules
 from .text_match import any_kw_in, match_window
 
 PRODUCT_WORDS = ["配置", "亮点", "卖点", "外观", "内饰", "续航", "动力", "参数", "这款车"]
+SWAP_HAND_TRIGGERS = ["您来开", "换您开", "你来试试", "换手", "找个地方停", "换您试试", "换你开", "我来开", "让我开"]
+
+
+def _arm_drive_phase_musts(session, rules: dict):
+    stages = rules["stages"]
+    if session.stage_idx < 0:
+        return
+    if stages[session.stage_idx]["id"] not in ("drive_route", "adjust_seat"):
+        return
+    if session.drive_active_since == 0:
+        session.drive_active_since = time.time()
+    drive_stage = next(s for s in stages if s["id"] == "adjust_seat")
+    for must in drive_stage.get("must", []):
+        if must.get("activate", {}).get("mode") == "after_drive_enter":
+            _arm(session, must)
 
 
 def _arm(session, rule: dict):
@@ -61,8 +76,15 @@ def apply_arm_triggers(session, rules: dict, text: str | None):
 
         elif mode == "on_scene_enter":
             keys = act.get("keywords") or must.get("trigger", [])
-            if any_kw_in(text, keys):
-                _arm(session, must)
+            if not any_kw_in(text, keys):
+                continue
+            # 场景词只在 must 所属阶段生效，避免迎接阶段「到了」等误 arm 试驾后规则
+            if stage is not None:
+                if session.stage_idx < 0:
+                    continue
+                if rules["stages"][session.stage_idx]["id"] != stage["id"]:
+                    continue
+            _arm(session, must)
 
         elif mode == "on_behavior":
             if session.product_pitch_since > 0:
@@ -88,21 +110,43 @@ def apply_arm_triggers(session, rules: dict, text: str | None):
             if session.invite_rejected and not session.invite_done:
                 _arm(session, must)
 
+    if text and any_kw_in(text, SWAP_HAND_TRIGGERS):
+        _arm_drive_phase_musts(session, rules)
 
-def apply_evidence(session, rules: dict, text: str | None) -> list[Event]:
+
+def apply_evidence(
+    session,
+    rules: dict,
+    text: str | None,
+    *,
+    skip_after_enter_stage_idx: int | None = None,
+) -> list[Event]:
     events = []
     if not text:
         return events
     idx = session.stage_idx
     stage_name = rules["stages"][idx]["name"] if idx >= 0 else None
+    skip_stage_id = (
+        rules["stages"][skip_after_enter_stage_idx]["id"]
+        if skip_after_enter_stage_idx is not None
+        else None
+    )
 
     for stage, must in iter_must_rules(rules):
         rid = must["id"]
         st = session.rule(rid)
         if st.status not in ("armed", "alerted"):
             continue
+        if skip_stage_id and stage is not None and stage.get("id") == skip_stage_id:
+            mode = must.get("activate", {}).get("mode", "after_stage_enter")
+            if mode == "after_stage_enter":
+                continue
         keywords = must.get("keywords", [])
-        if not any_kw_in(text, keywords) and not match_window(session.full_text, keywords, 120):
+        # 留资阶段进入词与完成词相同，滑窗会把上一句开口词误算完成
+        use_window = stage is None or stage.get("id") != "get_contact"
+        if not any_kw_in(text, keywords) and not (
+            use_window and match_window(session.full_text, keywords, 120)
+        ):
             continue
         st.status = "done"
         session_log.write(f'[命中] {must.get("desc", rid)}')

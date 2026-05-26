@@ -15,6 +15,9 @@ header h1{font-size:18px;font-weight:500;flex:1;min-width:160px}
 #btn-new-session:hover:not(:disabled){background:#2563eb33;border-color:#81d4fa}
 #btn-new-session:active:not(:disabled){transform:scale(.98)}
 #btn-new-session:disabled{opacity:.55;cursor:wait}
+#conn-badge{font-size:12px;padding:4px 10px;border-radius:12px;background:#37474f;color:#90a4ae}
+#conn-badge.ok{background:#1b5e2033;color:#81c784;border:1px solid #4caf50}
+#conn-badge.bad{background:#b71c1c33;color:#ef9a9a;border:1px solid #f44336}
 .main{display:flex;flex:1;overflow:hidden}
 #transcript{flex:2;padding:20px;overflow-y:auto;border-right:1px solid #0f3460}
 #transcript h3{font-size:14px;color:#8aa4c8;margin-bottom:12px;font-weight:500}
@@ -35,6 +38,7 @@ header h1{font-size:18px;font-weight:500;flex:1;min-width:160px}
 <header>
 <h1>🚗 汽车销售实时纠偏</h1>
 <span id="stage-badge">等待开始</span>
+<span id="conn-badge" class="bad">未连接</span>
 <button type="button" id="btn-new-session" title="清空当前接待，开始下一位客户">新接待</button>
 </header>
 <div class="main">
@@ -42,11 +46,21 @@ header h1{font-size:18px;font-weight:500;flex:1;min-width:160px}
 <div id="sidebar"><h3>现场提醒记录</h3></div>
 </div>
 <script>
-const socket = io();
+const socket = io({ transports: ['websocket', 'polling'] });
 const transcript = document.getElementById('transcript');
 const sidebar = document.getElementById('sidebar');
 const badge = document.getElementById('stage-badge');
+const connBadge = document.getElementById('conn-badge');
 const icons = {ok:'✓', warn:'⚠', error:'🚫', stage:'📍', info:'ℹ', back:'🔙'};
+
+function setConn(ok, label) {
+  connBadge.textContent = label;
+  connBadge.className = ok ? 'ok' : 'bad';
+}
+
+socket.on('connect', () => setConn(true, '已连接'));
+socket.on('disconnect', () => setConn(false, '未连接'));
+socket.on('connect_error', () => setConn(false, '连接失败'));
 
 socket.on('text', d => {
   const div = document.createElement('div');

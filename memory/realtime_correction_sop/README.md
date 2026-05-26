@@ -24,7 +24,7 @@
 | 补救命中 | 支持超时提醒后继续命中并记录“命中” |
 | 预生成音频 | `alerts_audio/` 中按 `audio_id` 提供 wav |
 | Web 展示 | Flask + Socket.IO 展示文本、阶段、日志 |
-| 测试脚本（非现场交付） | `test_0514_sop_full_triggers.py`：present/missing、clean flow、补救、跳阶、变体、负例与 gap 追踪 |
+| 测试脚本（非现场交付） | `test_0514_sop_full_triggers.py`：22 条 must 全覆盖、MG7 clean flow、需求/产品/留资阶段与回退、跳阶、变体、补救、关系负例与 gap 追踪 |
 
 当前仍未覆盖的已知 gap：
 
@@ -141,33 +141,44 @@ memory/realtime_correction_sop/
 
 ### 代码量
 
-| 分类 | 文件数 | 行数 | 是否现场交付 |
-|------|--------|------|----------------|
-| 核心运行时（`match/` + 管道 6 个 `.py`） | 17 | 1062 | 是 |
-| 规则配置 `sop_rules.py` | 1 | 323 | 是（业务配置） |
-| Demo UI（`web_server.py` + `templates/index.html`） | 2 | 138 | 是（当前 demo） |
-| 音频生成 `generate_alerts.py` | 1 | 84 | 运维脚本，非接待时运行 |
-| 自测 `tests/test_0514_sop_full_triggers.py` | 1 | 311 | 否 |
-| 文档 `README.md` | 1 | 350 | 否（开发/对接用） |
-| **模块内合计** | **21** | **1897** | — |
+统计口径：对 `memory/realtime_correction_sop/` 下各文件执行 PowerShell `(Get-Content … | Measure-Object -Line).Lines`（**非空行计数**，与 IDE「行数」可能差 1～2 行）。在仓库根目录可用下面命令复算：
 
-核心运行时拆分（1062 行）：
+```powershell
+cd memory\realtime_correction_sop
+# 匹配内核 + 管道（不含 sop_rules / generate_alerts / tests）
+Get-ChildItem match\*.py, asr_engine.py, monitor.py, detector.py, player.py, io_devices.py |
+  ForEach-Object { (Get-Content $_.FullName | Measure-Object -Line).Lines } |
+  Measure-Object -Sum
+```
+
+| 分类 | 文件数 | 行数（约） | 是否现场交付 |
+|------|--------|------------|----------------|
+| 匹配内核 `match/*.py` | 10 | 476 | 是 |
+| 管道（ASR / monitor / detector / player / io） | 5 | 263 | 是 |
+| Web 入口 `web_server.py` | 1 | 57 | 是（demo） |
+| 规则配置 `sop_rules.py` | 1 | 328 | 是（业务配置） |
+| Demo 页面 `templates/index.html` | 1 | 102 | 是 |
+| 音频生成 `generate_alerts.py` | 1 | 84 | 运维脚本，非接待时运行 |
+| 自测 `tests/test_0514_sop_full_triggers.py` | 1 | 419 | 否 |
+| 文档 `README.md` | 1 | 652 | 否（开发/对接用） |
+| **模块内合计（py + 讲稿页 html，不含 README）** | **20** | **~1310** | — |
+
+核心运行时拆分（796 行）：
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `match/must.py` | 149 | 激活、命中、超时、补救 |
+| `match/must.py` | 190 | 激活、命中、超时、补救；留资/进阶段/换手等 |
 | `match/stage.py` | 112 | 阶段推进、skipped、hint_next |
 | `asr_engine.py` | 103 | 采集与识别回调 |
 | `monitor.py` | 56 | Event 分发与播报 |
+| `web_server.py` | 57 | HTTP + Socket.IO |
 | `match/session.py` | 52 | 会话与规则状态 |
-| `web_server.py` | 48 | HTTP + Socket.IO |
 | `io_devices.py` | 49 | 设备选择 |
+| `match/engine.py` | 44 | tick 顺序；进阶段当 tick 延后 must 命中 |
 | `match/forbidden.py` | 36 | 违规监听 |
-| `match/engine.py` | 37 | tick 顺序 |
 | `player.py` | 36 | 播放 |
-| 其余 `match/*`、`detector.py` | ~82 | Event、日志、工具函数 |
-
-含规则表的业务实现体量约 **1385 行**（1062 运行时 + 323 `sop_rules.py`）。
+| `detector.py` | 19 | Session + `engine.tick` 薄封装 |
+| 其余 `match/*` | 42 | Event、日志、`text_match`、`rules_util` |
 
 运行产物和业务来源：
 
@@ -263,13 +274,16 @@ python memory\realtime_correction_sop\tests\test_0514_sop_full_triggers.py
 ```text
 Excel/SOP ref -> rule_id 映射
 每条 must present / missing
-完整 clean flow
+realistic / MG7 clean flow（含产品介绍后留资、再进试驾）
+test_0514_needs_product_contact_stage_enter_reenter_and_hit（需求/产品/留资进入与回退）
 缺失 -> 提醒 -> 补救
-跳阶段不阻断
-部分真实话术变体
-负例不误报
-已知 gap 追踪
+跳阶段不阻断（准备试驾 strong 跨阶，stage=drive_route）
+部分真实话术变体（含 ask_experience 多句变体）
+SOP 关系负例（已完成后 tick 不再重复提醒）
+已知 gap 追踪（语义层与部分自然表达仍为 open）
 ```
+
+讲稿与 clean flow 对齐见 `temp/realtime_correction_sop/基于测试脚本的全流程讲稿.md`。
 
 ## 对接接口
 
@@ -429,7 +443,7 @@ events += tick(None, session, SOP_RULES)
 | `must_timeout` | must 超时提醒 |
 | `forbidden` | 命中禁止表达 |
 | `hint_next` | 当前阶段完成后提示进入下一环节 |
-| `session_end` | 会话结束 |
+| `session_end` | 会话结束（当前在**最后一阶段** `auto_park` 的 must 全部完成后触发） |
 
 Web 日志推荐映射：
 

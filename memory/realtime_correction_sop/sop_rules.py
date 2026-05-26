@@ -1,5 +1,8 @@
 """上汽MG销售接待SOP - 全量规则，场景门控激活（首版短超时便于联调）"""
 
+# 留资：进入 / 强跳 / 回退 / must 命中共用
+CONTACT_STAGE_KWS = ["留个", "联系方式", "电话", "手机号", "加个微信", "方便留"]
+
 SOP_RULES = {
     "stages": [
         {
@@ -37,9 +40,9 @@ SOP_RULES = {
             "id": "self_intro",
             "name": "需求分析",
             "hint_next": True,
-            "enter_keywords": ["我是", "我叫", "销售顾问", "为您介绍", "自我介绍", "我来为您"],
+            "enter_keywords": ["我是", "我叫", "销售顾问", "自我介绍", "我来为您", "需求", "要求", "什么"],
             "enter_strong": [],
-            "reenter_keywords": [],
+            "reenter_keywords": ["再想想", "再考虑"],
             "must": [
                 {
                     "id": "self_intro",
@@ -78,9 +81,12 @@ SOP_RULES = {
             "id": "hint_test_drive",
             "name": "产品介绍",
             "hint_next": True,
-            "enter_keywords": ["给您介绍", "这款车", "配置", "亮点", "卖点", "外观", "内饰"],
+            "enter_keywords": [
+                "为您介绍", "给您介绍", "给您讲讲", "这款车", "配置", "亮点", "卖点",
+                "外观", "内饰", "底座", "空间", "性能", "车型",
+            ],
             "enter_strong": ["最大的优势", "车型版本"],
-            "reenter_keywords": ["再介绍", "再说说"],
+            "reenter_keywords": ["再介绍", "再说说", "再给您介绍", "再看看"],
             "must": [
                 {
                     "id": "hint_test_drive",
@@ -110,15 +116,15 @@ SOP_RULES = {
             "id": "get_contact",
             "name": "留资开口",
             "hint_next": True,
-            "enter_keywords": ["留个", "联系方式", "电话", "手机号", "加个微信", "方便留"],
-            "enter_strong": [],
-            "reenter_keywords": [],
+            "enter_keywords": list(CONTACT_STAGE_KWS),
+            "enter_strong": list(CONTACT_STAGE_KWS),
+            "reenter_keywords": list(CONTACT_STAGE_KWS),
             "must": [
                 {
                     "id": "get_phone",
                     "desc": "留电话",
                     "scene": "contact",
-                    "keywords": ["电话", "手机号", "联系方式", "号码", "留个电话"],
+                    "keywords": list(CONTACT_STAGE_KWS),
                     "alert": "请争取留下电话。",
                     "audio_id": "get_phone",
                     "timeout_sec": 3,
@@ -128,7 +134,7 @@ SOP_RULES = {
                     "id": "try_wechat",
                     "desc": "加微信",
                     "scene": "contact",
-                    "keywords": ["微信", "加个微信", "扫一下", "朋友圈", "企业微信"],
+                    "keywords": list(CONTACT_STAGE_KWS) + ["微信", "扫一下", "朋友圈", "企业微信"],
                     "trigger": ["不用了", "不需要", "不留了", "不方便", "下次吧", "再说吧", "不加"],
                     "alert": "试着加个微信。",
                     "audio_id": "try_wechat",
@@ -193,7 +199,7 @@ SOP_RULES = {
             "id": "adjust_seat",
             "name": "试驾",
             "hint_next": True,
-            "enter_keywords": ["出发", "启动车辆", "驾驶模式", "踩油门", "踩电门", "起步"],
+            "enter_keywords": ["启动车辆", "驾驶模式", "踩油门", "踩电门"],
             "enter_strong": ["运动模式", "开始试驾"],
             "reenter_keywords": [],
             "must": [
@@ -255,7 +261,7 @@ SOP_RULES = {
         {
             "id": "auto_park",
             "name": "结束试驾",
-            "hint_next": False,
+            "hint_next": True,
             "enter_keywords": ["回到店", "停好了", "试驾结束", "回来了"],
             "enter_strong": ["自动泊车", "体验自动泊车", "还有什么想了解"],
             "reenter_keywords": [],
@@ -279,7 +285,7 @@ SOP_RULES = {
                     "alert": "快速总结试驾体验。",
                     "audio_id": "drive_review",
                     "timeout_sec": 6,
-                    "activate": {"mode": "on_scene_enter", "keywords": ["到了", "下车吧", "停好了"]},
+                    "activate": {"mode": "on_scene_enter", "keywords": ["回店了", "下车吧", "试驾结束", "停好了", "到了"]},
                 },
                 {
                     "id": "invite_in_store",
@@ -301,7 +307,7 @@ SOP_RULES = {
             "id": "get_phone_leave",
             "desc": "离店留电话",
             "scene": "contact",
-            "keywords": ["电话", "手机号", "联系方式", "留个电话", "加个微信"],
+            "keywords": list(CONTACT_STAGE_KWS) + ["留个电话"],
             "alert": "请争取留下电话。",
             "audio_id": "get_phone",
             "timeout_sec": 3,

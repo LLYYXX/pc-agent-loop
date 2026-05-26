@@ -18,13 +18,20 @@ def tick(text_or_none: str | None, session: Session, rules: dict) -> list[Event]
 
     entered_idx = None
     for ev in stage_events:
-        if ev.type == "stage_enter":
+        if ev.type in ("stage_enter", "stage_reenter"):
             entered_idx = ev.meta.get("stage_idx")
     if entered_idx is not None:
         must_mod.arm_after_stage_enter(session, rules, entered_idx)
 
     must_mod.apply_arm_triggers(session, rules, text)
-    events.extend(must_mod.apply_evidence(session, rules, text))
+    events.extend(
+        must_mod.apply_evidence(
+            session,
+            rules,
+            text,
+            skip_after_enter_stage_idx=entered_idx,
+        )
+    )
     events.extend(forbidden_mod.apply_tick(session, rules, text))
 
     extra: list[Event] = []
