@@ -1,6 +1,13 @@
 """ASR引擎 - 纯音频采集+识别，回调输出增量文本"""
-import sherpa_onnx, pyaudio, numpy as np, threading, time, os
-from io_devices import get_input_index
+import os
+import threading
+import time
+
+import numpy as np
+import pyaudio
+import sherpa_onnx
+
+from io_devices import _CHECK_EVERY_READS, close_stream, get_input_index, open_input_stream
 
 RATE = 16000
 WINDOW_SEC = 5.0
@@ -16,18 +23,45 @@ _last_text = ""
 _stop = threading.Event()
 _on_text = None  # callback(new_part)
 
+
 def _get_new_part(old, new):
     prefix = os.path.commonprefix([old, new])
     return new[len(prefix):] if prefix else new
 
+
 def _capture():
     p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=RATE,
-                    input=True, input_device_index=get_input_index(),
-                    frames_per_buffer=int(RATE * 0.1))
+    stream = None
+    device_idx = None
+    read_count = 0
+
+    def _reopen(reason=""):
+        nonlocal stream, device_idx, read_count
+        close_stream(stream)
+        if reason:
+            print(f"[ASR] {reason}", flush=True)
+        stream, device_idx = open_input_stream(p, RATE, int(RATE * 0.1))
+        read_count = 0
+
+    _reopen()
     global _buf_pos
     while not _stop.is_set():
-        data = stream.read(int(RATE * 0.1), exception_on_overflow=False)
+        try:
+            data = stream.read(int(RATE * 0.1), exception_on_overflow=False)
+        except (OSError, IOError) as e:
+            _reopen(f"输入异常，重选默认设备: {e}")
+            time.sleep(0.3)
+            continue
+
+        read_count += 1
+        if device_idx is not None and read_count >= _CHECK_EVERY_READS:
+            read_count = 0
+            try:
+                if get_input_index() != device_idx:
+                    _reopen("默认输入设备已变更，重新打开")
+            except OSError as e:
+                _reopen(f"查询输入设备失败: {e}")
+
         samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
         with _buf_lock:
             n = len(samples)
@@ -37,9 +71,12 @@ def _capture():
             else:
                 tail = len(_ring_buf) - _buf_pos
                 _ring_buf[_buf_pos:] = samples[:tail]
-                _ring_buf[:n-tail] = samples[tail:]
+                _ring_buf[:n - tail] = samples[tail:]
             _buf_pos = end % len(_ring_buf)
-    stream.stop_stream(); stream.close(); p.terminate()
+
+    close_stream(stream)
+    p.terminate()
+
 
 def _recognize():
     global _last_text
@@ -61,6 +98,7 @@ def _recognize():
         if new_part and _on_text:
             _on_text(new_part)
 
+
 def start(on_text):
     """启动ASR引擎。on_text(new_part_or_None) 每0.5s回调一次"""
     global _recognizer, _on_text, _last_text, _buf_pos
@@ -75,8 +113,10 @@ def start(on_text):
         language="zh", use_itn=True, num_threads=4)
     t1 = threading.Thread(target=_capture, daemon=True)
     t2 = threading.Thread(target=_recognize, daemon=True)
-    t1.start(); t2.start()
+    t1.start()
+    t2.start()
     return t1, t2
+
 
 def stop():
     _stop.set()

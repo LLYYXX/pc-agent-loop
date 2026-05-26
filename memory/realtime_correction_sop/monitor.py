@@ -1,47 +1,68 @@
-"""纠偏监控器 - 接收文本，驱动detector检测+player播报"""
+"""纠偏监控器 - 接收文本，驱动 detector，按 Event 播报"""
 import threading
 
 import player
 from detector import StageDetector
+from match.events import Event
 
 detector = StageDetector()
 _on_alert = None
 _on_info = None
 _reset_timer = None
+_lock = threading.RLock()
+
 
 def stage_name():
-    return "等待开始" if detector.current_stage_idx < 0 else detector.stages[detector.current_stage_idx]["name"]
+    with _lock:
+        return detector.stage_name()
+
 
 def feed(new_part):
-    alerts = detector.force_check_timeout() if new_part is None else detector.update(new_part) + detector.force_check_timeout()
-    _dispatch(alerts)
-    return alerts
+    with _lock:
+        if new_part is None:
+            events = detector.force_check_timeout()
+        else:
+            events = detector.tick(new_part) + detector.force_check_timeout()
+        _dispatch(events)
+    return events
 
-def _dispatch(alerts):
-    for alert in alerts:
-        atype, text = alert[0], alert[1]
-        aid = alert[2] if len(alert) > 2 else None
-        just_entered = alert[3] if len(alert) > 3 else False
+
+def reset_session(msg="[新会话开始]"):
+    """立即清空会话（取消待执行的自动重置）。"""
+    global _reset_timer
+    timer = _reset_timer
+    if timer and timer.is_alive():
+        timer.cancel()
+    _reset_timer = None
+    with _lock:
+        detector.reset()
+    if _on_info:
+        _on_info(msg)
+
+
+def _dispatch(events: list[Event]):
+    for ev in events:
         if _on_alert:
-            _on_alert(atype, text, aid, just_entered)
-        if atype == "stage_enter" or (atype == "must_ok" and not just_entered):
-            player.play("ding")
-        elif atype not in ("must_ok", "skipped", "stage_reenter"):
-            player.play(text)
-        if atype == "must_ok" and aid == "send_off":
-            detector.reset()
-        elif text == "送客到门口":
+            _on_alert(ev)
+        if ev.type == "session_end":
             _schedule_reset()
+            continue
+        if ev.type in ("stage_enter", "must_ok"):
+            threading.Thread(target=player.play, args=("ding",), daemon=True).start()
+        elif ev.is_audio_alert():
+            threading.Thread(target=player.play, args=(ev.audio_id,), daemon=True).start()
+
 
 def _schedule_reset():
     global _reset_timer
     if _reset_timer and _reset_timer.is_alive():
         return
-    _reset_timer = threading.Timer(60.0, detector.reset)
+    _reset_timer = threading.Timer(60.0, reset_session)
     _reset_timer.daemon = True
     _reset_timer.start()
     if _on_info:
         _on_info("[送客] 60s后自动开启新会话")
+
 
 def init(on_alert=None, on_info=None):
     global _on_alert, _on_info
