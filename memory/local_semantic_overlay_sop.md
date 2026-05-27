@@ -1,184 +1,176 @@
 # LSO Agent SOP
 
-LSO 是本地文件任务的轻量语义覆盖工具。Agent 只在需要反复发现、复用、组织某个目录范围内的文件证据时使用它。
+LSO 是本地文件任务的轻量语义覆盖工具：在明确 `scope` 内沉淀可复用、可审计、可导航的文件证据层。它不是一次性找文件工具，也不是 coverage planner；目录观察和采样规划由 Agent 用普通文件系统能力完成。
 
-## 什么时候用
+## 0. 核心纪律
 
-使用：
+只在以下场景使用 LSO：用户给出固定 scope，且任务需要在该范围内反复找文件、读证据、复用判断。不用于单文件读写、一次性路径搜索、或不依赖文件证据复用的任务。
 
-- 用户给出固定目录或明确 scope。
-- 任务需要在该范围内反复找文件、读证据、复用已有判断。
-- 任务需要沉淀“哪些文件和哪些概念相关”。
+scope 已明确且可访问时，不因 scope 大而停止；改为 bounded sample 并声明边界。scope 不存在、权限不可读、目标含糊时，先澄清或报告阻塞。
 
-不使用：
+Agent 使用 LSO 时必须区分三层结果：
 
-- 只读写一个明确文件。
-- 只做一次路径搜索。
-- 任务不依赖目录内文件证据复用。
+| 状态 | 含义 | 不得越级表述 |
+| --- | --- | --- |
+| `leaf_sample_built` | 只完成文件级证据沉淀 | 不得说完整覆盖或 node coverage |
+| `node_coverage_built` | 本轮新增/更新 node，或复用与当前任务相关的已有 node | 不得说 runtime 有效 |
+| `runtime_validated` | 已用代表性查询验证 overlay 对任务有帮助 | 仍须说明验证边界 |
 
-## 基本约束
+禁止把 `session.finalize()`、`node_count > 0`、metadata-only、filename/path/fallback 命中说成“覆盖完成”。
 
-- Runtime 只查询 overlay，不写 overlay。
-- 只有 Build 阶段能写 leaf tags、metadata、nodes。
-- fallback 搜索结果只作为下一轮候选，不自动入库。
-- `semantic_tags` 不是 Agent 输入，而是 core 审计通过后的输出。
-- Agent 只能提交 TagProposal，不能直接写 `semantic_tags`。
-- `content_semantic` proposal 必须有 `evidence_phrase` 和 `evidence_source`。
-- `content_semantic.evidence_source` 只能是 `text_head`。
-- filename 只作为 `filename_hint` 返回和匹配，不能作为 semantic evidence。
-- path、目录、来源渠道只能作为 `location` / `source_channel` metadata，不能进入 `content_semantic`。
-- metadata-only 不算 semantic coverage。
-- leaf-only 样本不能表述成完整语义覆盖。
-- nodes=0 时不得暗示已经形成 compression / aggregation 节点。
-- 结果表述禁止使用“完成”“所有”“完整”，除非有穷尽性证据。
+## 1. Coverage Task 流程
 
-## Build
+一次 coverage task 按以下阶段执行。API 只是执行这些阶段的工具。
+
+| 阶段 | 必做事项 | 产物 |
+| --- | --- | --- |
+| A. Scope & Boundary | 记录 `scope`、`scope_type`、`build_mode`、未覆盖范围 | 本轮边界 |
+| B. Candidate Policy | 综合用户关键词、目录/anchor 观察、高价值文件类型、已有 overlay、fallback seeds；不得只用自编关键词 | candidate paths |
+| C. Leaf Evidence Build | select/read/ensure/proposal/apply | `BuildSession.finalize()` |
+| D. Node Eligibility Check | 用 `top_anchors`、本轮 selected/readable paths、`proposal_log` 判断是否尝试 compression/aggregation | node check result |
+| E. Runtime Validation | 仅当要声明 `runtime_validated` 时，跑 2-5 个代表性 query | hit_type 分布 |
+| F. Bounded Report | 用固定模板报告本轮状态和边界 | 可审计总结 |
+
+目录规划和采样策略由 Agent 在调用 LSO 前完成。LSO 只处理路径候选、证据读取、写入审计、overlay 查询和命中来源标注。
+
+## 2. Candidate Policy
+
+候选来源至少考虑：
+
+- 用户任务关键词或路径线索。
+- scope 下顶级目录、主要 anchors、近期目录。
+- 高价值文件类型：README、Office、PDF、文本、代码、manifest。
+- 已有 overlay 的 top anchors、top tags，以及可通过公开接口获得的 active/cold 信息。
+- fallback seeds。
+
+对于 large root，例如 `F:\`，先观察顶级目录或主要 anchors，再决定 bounded sample。不得用一组通用关键词代表整盘覆盖。
+
+## 3. Leaf Evidence Build
+
+Leaf build 只产生 leaf-level coverage。真实任务中的 `paths` 必须来自 Stage B。
+
+`candidate_paths_from_stage_b` 是路径字符串列表；若候选来自 `search_rows`，需要先取 `r["path"]`。
 
 ```python
-import json
-import os
-import sys
-
-ROOT = "/abs/path/to/pc-agent-loop"
-sys.path.insert(0, os.path.join(ROOT, "memory"))
-
 import local_semantic_overlay as lso
 
-SCOPE = "/abs/path/to/task/root"
-
-lso.ensure_search_ready()
-
 session = lso.BuildSession(SCOPE)
-rows = lso.search_rows("关键词", scope=SCOPE, limit=30)
-paths = [r["path"] for r in rows]
+paths = candidate_paths_from_stage_b
 session.add_candidates(len(paths))
 
 for row in lso.select_for_read(paths, seeds=[], fallback_seeds=[], limit=15):
     session.try_read(row["path"])
     leaf_id = session.ensure_leaf(row["path"])
-
     prep = lso.prepare_leaf_tag_task(SCOPE, leaf_id)
     if not prep["ok"]:
         continue
-
-    task = prep["task"]
-    # readable leaf: task["allowed_evidence_sources"] == ["text_head"]
-    # non-readable leaf: task["allowed_evidence_sources"] == []
-    # Agent reads task["text_head"] for semantic proposals; task["filename_hint"] is a hint only.
-    proposals = [
-        {
-            "tag": "跨境贸易支付",
-            "evidence_phrase": "高性能可信跨境贸易支付监管关键技术研究",
-            "evidence_source": "text_head",
-            "tag_role": "content_semantic",
-        }
-    ]
+    task = prep["task"]  # text_head is semantic evidence; filename_hint is only a hint.
+    proposals = [{"tag": "...", "evidence_phrase": "...",
+                  "evidence_source": "text_head", "tag_role": "content_semantic"}]
     session.propose_tags(leaf_id, proposals)
 
-lso.enforce_active_budget(SCOPE)
-print(json.dumps(session.finalize(), ensure_ascii=False, indent=2))
+audit = session.finalize()
 ```
 
-Evidence channels:
+`read_status == "readable"` 时，semantic evidence 只能来自 `text_head`。不可读 leaf 可以保留 `filename_hint`，但不产生 `semantic_tags`。
 
-| leaf 状态 | semantic evidence | filename channel |
+## 4. 语义通道约束
+
+| 通道 | 含义 | 是否算 semantic coverage |
 | --- | --- | --- |
-| `read_status == "readable"` | `text_head` | `filename_hint` |
-| `read_status != "readable"` | 无 | `filename_hint` |
+| `semantic_tags` | 文件内容在讲什么，只能来自 `text_head` evidence | 是 |
+| `filename_hint` | 文件名主体线索，用于召回和展示 | 否 |
+| `location_tags` | 目录或位置线索 | 否 |
+| `source_channel` | 来源渠道，例如 chat/mail/download | 否 |
+| `path` | 路径字面线索 | 否 |
 
-`filename_hint` 可以帮助召回和展示，但不产生 `semantic_tags`。
+约束：
 
-## TagProposal
+- Runtime 只查询 overlay，不写 overlay。
+- 只有 Build 阶段能写 leaf tags、metadata、nodes。
+- `semantic_tags` 不是 Agent 输入，而是 core 审计通过后的输出。
+- Agent 只能提交 TagProposal，不能直接写 `semantic_tags`。
+- `content_semantic.evidence_source` 只能是 `text_head`。
+- filename/path/source/location/fallback 不得进入 `content_semantic`。
+- metadata-only 不算 semantic coverage。
+
+## 5. TagProposal 契约
 
 ```python
-proposals = [
-    {
-        "tag": "跨境贸易支付",
-        "evidence_phrase": "高性能可信跨境贸易支付监管关键技术研究",
-        "evidence_source": "text_head",
-        "tag_role": "content_semantic",       # content_semantic | location | source_channel
-    }
-]
-
-result = lso.propose_leaf_tags(SCOPE, leaf_id, proposals)
+result = lso.propose_leaf_tags(SCOPE, leaf_id, [
+    {"tag": "跨境贸易支付",
+     "evidence_phrase": "高性能可信跨境贸易支付监管关键技术研究",
+     "evidence_source": "text_head",
+     "tag_role": "content_semantic"}  # content_semantic | location | source_channel
+])
 ```
 
-`tag_role` 路由：
+路由：
 
-| tag_role | 写入字段 | evidence |
+| `tag_role` | 写入字段 | evidence |
 | --- | --- | --- |
-| `content_semantic` | `semantic_tags` | 必须 |
+| `content_semantic` | `semantic_tags` | 必须，且贴回 `text_head` |
 | `location` | `location_tags` | 不需要 |
 | `source_channel` | `source_channel` | 不需要，单值 |
 
-`propose_leaf_tags` 成功路径是 full replacement：本次通过审计的结果会完整替换 leaf 上的 `semantic_tags`、`location_tags`、`source_channel`。如果要保留旧 tag，必须在本次 proposals 中重新提交。
+成功路径是 full replacement：本次通过审计的结果会完整替换 leaf 上的 `semantic_tags`、`location_tags`、`source_channel`。错误路径不改 leaf。`ok=True` 不等于 `semantic_applied=True`。
 
-错误路径不改 leaf，例如所有 proposals 被拒绝时返回 `no_tags_accepted`。
+返回值要点：`accepted`、`rejected`、`semantic_tags`、`metadata`、`semantic_applied`、`metadata_applied`。
 
-返回值要点：
+## 6. Build Audit
 
-```python
-{
-    "ok": bool,
-    "error": None | str,
-    "accepted": [{"tag": str, "evidence_phrase": str, "evidence_source": str, "tag_role": str}],
-    "rejected": [{"tag": str, "evidence_phrase": str, "evidence_source": str, "tag_role": str, "reason": str}],
-    "semantic_tags": list[str],
-    "metadata": {"location_tags": list[str], "source_channel": str | None},
-    "semantic_applied": bool,
-    "metadata_applied": bool,
-}
-```
+`session.finalize()` 返回 overlay 快照和 `process` 统计。`process` 是本轮 leaf build 的唯一统计来源，但不能单独证明 coverage task 已完成。
 
-`ok=True` 不等于 `semantic_applied=True`。metadata-only 写入应报告为 `semantic_applied=False, metadata_applied=True`。
-
-## Build Audit
-
-`session.finalize()["process"]` 是构建总结的唯一统计来源。关键字段：
+必须关注：
 
 ```text
-candidate_path_count
-selected_count
-readable_count
-skipped_count
-proposal_count
-proposal_accepted
-proposal_rejected
-semantic_applied_count
-metadata_applied_count
-semantic_apply_ok
-metadata_apply_ok
-evidence_source_text_head
-apply_ok
-apply_fail
-unique_leaf_before
-unique_leaf_after
-unique_leaf_delta
-proposal_log
+process:
+candidate_path_count selected_count readable_count skipped_count
+proposal_count proposal_accepted proposal_rejected
+semantic_apply_ok metadata_apply_ok
+semantic_applied_count metadata_applied_count
+unique_leaf_before unique_leaf_after unique_leaf_delta
+apply_ok apply_fail proposal_log
+
+snapshot:
+unique_leaf_count tagged_leaf_count untagged_leaf_count
+node_count node_source_dist read_status_dist top_tags top_anchors
 ```
 
-构建总结必须引用 `semantic_apply_ok` 作为 semantic coverage 入口，不能用 metadata-only 或 apply attempt 冒充语义覆盖。
+构建总结必须引用 `semantic_apply_ok` 作为 semantic coverage 入口，不能用 metadata-only、proposal accepted 或 apply attempt 冒充语义覆盖。
 
-## Runtime
+## 7. Node Eligibility 与 Node Build
+
+Leaf build 后必须检查 node eligibility，不能直接用“停留 leaf sample”跳过。
+
+检查：
+
+- 用 `top_anchors`、本轮 selected/readable paths、`proposal_log` 判断是否有主要 anchor。
+- 判断是否有重复主题、重复 tags、任务关键主题簇。
+
+执行：
+
+- 高价值 anchor：尝试 `prepare_compression_task` / `apply_compression`，或记录 `defer | expand | insufficient_evidence`。
+- 跨 anchor 主题簇：尝试 `prepare_aggregation_task` / `apply_aggregation`，或记录 `defer | insufficient_evidence`。
+- 无候选：记录 `no_node_candidate`。
+
+`node_count` 是 overlay 快照，不等于本轮 node build 成果。不得仅因 snapshot 中 `node_count > 0` 判定本轮达到 `node_coverage_built`。`node_coverage_built` 只能来自本轮新增/更新 node，或复用已有 node 且通过 runtime query 证明与当前任务相关。
+
+受控结果值：
+
+```text
+compressed | aggregated | reused_existing_node | defer | expand | insufficient_evidence | no_node_candidate | not_run
+```
+
+## 8. Runtime Query 与 Validation
+
+若要声明 `runtime_validated`，必须跑 2-5 个代表性 query，并报告 hit_type 分布。未验证时只能停留在 `leaf_sample_built` 或 `node_coverage_built`。
 
 ```python
 res = lso.query(SCOPE, "检索词", limit=20)
-fallback_seeds = []
-
-for h in res["hits"]:
-    if h["hit_type"] == "semantic_node":
-        rh = lso.record_hit(SCOPE, h["node_id"])
-        if rh.get("action") == "needs_recheck":
-            task = lso.recheck_cold_node(SCOPE, h["node_id"])
-            # Read task["task"], then call apply_recheck with Agent decision.
-            # lso.apply_recheck(SCOPE, h["node_id"], {"decision": "keep|delete|update", ...})
-    elif h["hit_type"] == "leaf_tag":
-        pass  # read h["path"]
-    elif h["hit_type"] in ("filename_hint", "metadata", "path"):
-        pass  # inspect h["match_reasons"] before reading
-    elif h["hit_type"] == "fallback":
-        fallback_seeds.append(h["path"])
 ```
+
+每个 hit 必须看 `hit_type` 和 `match_reasons`：
 
 | hit_type | 含义 |
 | --- | --- |
@@ -189,60 +181,35 @@ for h in res["hits"]:
 | `path` | 路径字面命中 |
 | `fallback` | 搜索适配器召回，只能作为下一轮候选 |
 
-每个 hit 都应查看 `match_reasons`。它说明命中来自 `semantic_tags`、`filename_hint`、`source_channel`、`location_tags`、`path` 还是 `fallback`，避免把来源/文件名命中误读成内容语义。
+如果结果主要来自 `filename_hint` / `metadata` / `path` / `fallback`，只能说明 overlay 有文件线索价值，不能说明 semantic coverage 已经有效。
 
-## Feedback
+## 9. Bounded Report 模板
 
-只有显式反馈才能写入 feedback：
+最终报告必须绑定本轮 run state，不得越级。
 
-```python
-lso.record_feedback(SCOPE, result_id="q1", kind="selected", node_id="node_xxx")
-lso.record_feedback(SCOPE, result_id="q1", kind="not_selected", node_id="node_xxx")
-lso.record_feedback(SCOPE, result_id="q1", kind="negative", node_id="node_xxx")
+```text
+本轮状态：<leaf_sample_built | node_coverage_built | runtime_validated>
+scope: ...
+scope_type: ...
+build_mode: ...
+
+候选与读取：candidate=..., selected=..., readable=..., skipped=...
+语义写入：semantic_apply_ok=..., metadata_apply_ok=..., unique_leaf_delta=...
+节点状态：node_count=..., compression_checked=<yes/no>, aggregation_checked=<yes/no>, result=...
+验证状态：runtime_validation=<not_run | run>, hit_type_dist=...
+
+边界：本轮主要覆盖 ...；未覆盖 ...
+结论：本轮只能表述为 ...
 ```
 
-不要把“query 没命中”推断成负反馈。
+除非有穷尽性证据，不得使用“完整覆盖”“覆盖完成”“所有文件”“本机全部”“F 盘语义覆盖完成”。
 
-## Optional Build
+## 10. Feedback 与拒绝原因
 
-Compression:
-
-```python
-prep = lso.prepare_compression_task(SCOPE, SCOPE)
-result = {"decision": "compress", "label": "...", "tags": ["..."], "brief": "..."}
-lso.apply_compression(SCOPE, SCOPE, result)
-```
-
-Aggregation:
+只有显式反馈才能写入 feedback；不要把“query 没命中”推断成负反馈。
 
 ```python
-prep = lso.prepare_aggregation_task(SCOPE)
-result = {
-    "decision": "aggregate",
-    "label": "...",
-    "tags": ["..."],
-    "derived_from_ids": ["leaf_xxx", "node_yyy"],
-    "brief": "...",
-}
-lso.apply_aggregation(SCOPE, result)
+lso.record_feedback(SCOPE, result_id="q1", kind="selected|not_selected|negative", node_id="node_xxx")
 ```
 
-Node 的 evidence 约束体现在 `supporting_leaf_ids` 和 grounded `brief`，不是每个 node tag 单独 evidence phrase。
-
-## 常见拒绝原因
-
-| reason | 含义 |
-| --- | --- |
-| `missing_evidence` | content semantic 没有 evidence phrase |
-| `weak_evidence` | evidence phrase 太短 |
-| `invalid_tag_role` | tag_role 非法 |
-| `invalid_evidence_source` | content semantic evidence_source 非 `text_head` |
-| `no_evidence_source` | 请求的 evidence source 在该 leaf 不可用 |
-| `evidence_not_grounded` | evidence phrase 不能贴回对应证据 |
-| `duplicate_tag` | 同批 proposal 中 tag 规范化后重复 |
-| `multiple_source_channel` | 同批 proposal 出现多个 source_channel |
-| `tag_is_extension` | content semantic tag 等于扩展名 |
-| `tag_is_dir_token` | content semantic tag 等于父目录 token |
-| `no_tags_accepted` | 没有任何 proposal 通过 |
-| `brief_not_grounded` | node brief 不能贴回 supporting leaves |
-| `recursive_aggregation` | aggregation 递归引用 aggregated node |
+常见拒绝原因：`missing_evidence`、`weak_evidence`、`invalid_tag_role`、`invalid_evidence_source`、`no_evidence_source`、`evidence_not_grounded`、`duplicate_tag`、`multiple_source_channel`、`tag_is_extension`、`tag_is_dir_token`、`no_tags_accepted`、`brief_not_grounded`、`recursive_aggregation`。
