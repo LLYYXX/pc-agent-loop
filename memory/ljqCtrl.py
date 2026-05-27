@@ -2,12 +2,13 @@
 CRITICAL: 严禁在此工具链中 import pyautogui (会污染 win32api 导致逻辑冲突)。
 ljqCtrl Quick Reference:
 - dpi_scale: float (Logical = Physical * dpi_scale)
-- Click(x, y): Use Physical Coordinates (from screenshots)
+- Click(x, y, check=True): Use Physical Coordinates. check=True → 自动比前后像素变化，返回周边图像
 - SetCursorPos(z): Use Physical Coordinates z=(x, y)
 - Press(cmd, staytime=0): Keyboard shortcuts (e.g. 'ctrl+v')
 - FindBlock(fn, wrect=None, threshold=0.8) -> (obj_center_phys, is_found)
 - MouseDClick(staytime=0.05), MouseClick(staytime=0.05)
-- GrabWindow(hwnd) -> PIL Image: DPI-safe window screenshot
+- GrabWindow(hwnd) -> PIL Image: DPI-safe window screenshot (needs foreground)
+- GrabWindowBg(hwnd_or_name) -> PIL Image: WGC background capture (Win10+, pip install windows-capture)
 """
 
 import os, sys, time, random, math, win32api, win32con, ctypes
@@ -46,10 +47,19 @@ def SetCursorPos(z):
 	win32api.SetCursorPos(z)
 	time.sleep(0.05) 
 
-def Click(x, y=None):
+def Click(x, y=None, check=True):
 	if type(x) is type(tuple()): x, y = int(x[0]), int(x[1])
+	if check: before = ScreenCapAt(x, y)
 	SetCursorPos( (x, y) )
 	MouseClick()
+	if check:
+		time.sleep(0.3)
+		after = ScreenCapAt(x, y)
+		b, a = np.array(before), np.array(after)
+		diff = np.sum(np.any(b != a, axis=2))
+		total = b.shape[0] * b.shape[1]
+		print(f'[Click check] near 100px rect {diff}/{total} pixels changed ({diff/total*100:.1f}%)')
+		return after
 click = Click
 	
 def Press(cmd, staytime=0):
@@ -70,6 +80,25 @@ def GrabWindow(hwnd):
 	import win32gui; win32gui.SetForegroundWindow(hwnd); time.sleep(0.3)
 	bbox = tuple(int(v / dpi_scale) for v in win32gui.GetWindowRect(hwnd))
 	return ImageGrab.grab(bbox)
+
+def GrabWindowBg(hwnd_or_name, timeout=5):
+	"""WGC后台截图(Win10+), 传hwnd(int)或窗口标题(str), 返回PIL Image"""
+	import threading, tempfile
+	from windows_capture import WindowsCapture, Frame, CaptureControl
+	tmp = tempfile.mktemp(suffix='.png')
+	done = threading.Event()
+	kw = {'window_hwnd': hwnd_or_name} if isinstance(hwnd_or_name, int) else {'window_name': hwnd_or_name}
+	cap = WindowsCapture(cursor_capture=False, draw_border=False, **kw)
+	@cap.event
+	def on_frame_arrived(frame: Frame, capture_control: CaptureControl):
+		frame.save_as_image(tmp)
+		capture_control.stop(); done.set()
+	@cap.event
+	def on_closed(): done.set()
+	cap.start_free_threaded()
+	done.wait(timeout=timeout)
+	if os.path.exists(tmp):
+		img = Image.open(tmp); img.load(); os.remove(tmp); return img
 
 def imshow(mt, sec=0):
 	cv2.imshow('cc', mt)
@@ -106,6 +135,11 @@ def FindBlock(fn, wrect=None, verbose=0, threshold=0.8):
 		sscr = scr.crop([oj, oi, oj+tsw, oi+tsh])
 		sscr.show()
 	return obj, max_val > threshold
+
+def ScreenCapAt(x, y, r=100):
+	"""物理坐标(x,y)为中心±r的屏幕截图 → PIL Image"""
+	from PIL import ImageGrab
+	return ImageGrab.grab((x-r, y-r, x+r, y+r))
 
 if __name__ == '__main__':
 	#time.sleep(3)
