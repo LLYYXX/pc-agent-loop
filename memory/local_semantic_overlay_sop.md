@@ -1,215 +1,135 @@
-# LSO Agent SOP
+# Local Semantic Overlay SOP
 
-LSO 是本地文件任务的轻量语义覆盖工具：在明确 `scope` 内沉淀可复用、可审计、可导航的文件证据层。它不是一次性找文件工具，也不是 coverage planner；目录观察和采样规划由 Agent 用普通文件系统能力完成。
+LSO 用来发现用户常用、高价值文件，并沉淀成可移除的本地语义导航层。它不是全盘索引器，也不声称完整覆盖某个目录或磁盘。冷文件仍然留在 ES 里；当查询 miss 后，可以通过增量流程进入 LSO。
 
-## 0. 核心纪律
+## 调度
 
-只在以下场景使用 LSO：用户给出固定 scope，且任务需要在该范围内反复找文件、读证据、复用判断。不用于单文件读写、一次性路径搜索、或不依赖文件证据复用的任务。
+使用 `memory/subagent.md` 里的 GA CLI 文件 IO SubAgent 协议：
 
-scope 已明确且可访问时，不因 scope 大而停止；改为 bounded sample 并声明边界。scope 不存在、权限不可读、目标含糊时，先澄清或报告阻塞。
+```text
+prepare -> write_task_dir -> agentmain.py --task (保留打印出的 PID)
+        -> artifact.json -> apply_task_artifact -> close_task(PID) -> next_task
+```
 
-Agent 使用 LSO 时必须区分三层结果：
+单个 role 可按下面的最小协议手动推进；完整 cold/incremental build 应优先交给标准 driver 循环执行。
 
-| 状态 | 含义 | 不得越级表述 |
-| --- | --- | --- |
-| `leaf_sample_built` | 只完成文件级证据沉淀 | 不得说完整覆盖或 node coverage |
-| `node_coverage_built` | 本轮新增/更新 node，或复用与当前任务相关的已有 node | 不得说 runtime 有效 |
-| `runtime_validated` | 已用代表性查询验证 overlay 对任务有帮助 | 仍须说明验证边界 |
+```python
+info = lso.write_task_dir(task_name, task["role"], task)
+# 在仓库根目录运行 info["command"]，观察 output*.txt。
+result = lso.apply_task_artifact(scope, info["task_dir"])
+while result.get("correction_required"):
+    # 保持同一个 SubAgent 存活；它必须根据 reply.txt 自己重写 artifact.json。
+    result = lso.apply_task_artifact(scope, info["task_dir"])
+lso.close_task(pid)
+task = result.get("next_task")
+```
 
-禁止把 `session.finalize()`、`node_count > 0`、metadata-only、filename/path/fallback 命中说成“覆盖完成”。
+主 Agent 只负责派发、观察和推进状态。它不得扮演任何 role，不得写 `artifact.json`，不得编辑 `artifact.json`，不得裁剪字段，不得删除 claims，也不得用临时脚本替代某个 role。
 
-## 1. Coverage Task 流程
+如果 `apply_task_artifact()` 拒绝产物，它会写入 `reply.txt`。此时必须让同一个 SubAgent 根据 `reply.txt` 重写 `artifact.json`，然后再次调用 `apply_task_artifact()`。产物被接受或任务放弃后，必须关闭该 SubAgent 的 PID。LSO 串行执行：关闭当前 SubAgent 之前，不派发下一个 role。
 
-一次 coverage task 按以下阶段执行。API 只是执行这些阶段的工具。
+## 标准 Driver
 
-| 阶段 | 必做事项 | 产物 |
-| --- | --- | --- |
-| A. Scope & Boundary | 记录 `scope`、`scope_type`、`build_mode`、未覆盖范围 | 本轮边界 |
-| B. Candidate Policy | 综合用户关键词、目录/anchor 观察、高价值文件类型、已有 overlay、fallback seeds；不得只用自编关键词 | candidate paths |
-| C. Leaf Evidence Build | select/read/ensure/proposal/apply | `BuildSession.finalize()` |
-| D. Node Eligibility Check | 用 `top_anchors`、本轮 selected/readable paths、`proposal_log` 判断是否尝试 compression/aggregation | node check result |
-| E. Runtime Validation | 仅当要声明 `runtime_validated` 时，跑 2-5 个代表性 query | hit_type 分布 |
-| F. Bounded Report | 用固定模板报告本轮状态和边界 | 可审计总结 |
+Driver 是 LSO build 的机械调度器，不是新角色，也不做任何语义判断。正式实现是 `memory/local_semantic_overlay/runner.py::run_build`，并通过 `local_semantic_overlay.run_build(...)` 导出。
 
-目录规划和采样策略由 Agent 在调用 LSO 前完成。LSO 只处理路径候选、证据读取、写入审计、overlay 查询和命中来源标注。
+完整 build 的 driver 必须执行：
 
-## 2. Candidate Policy
+```text
+prepare(scope, reset/question/seeds)
+-> task(scope)
+-> write_task_dir(task_name, role, task)
+-> launch agentmain.py --task <task_name> --verbose
+-> parse and retain worker PID
+-> wait for fresh artifact.json and latest output containing [ROUND END]
+-> apply_task_artifact(scope, task_dir)
+-> if correction_required: keep same worker alive and wait for rewritten artifact.json
+-> cap correction retries, record timeout/stuck state, always close_task(PID)
+-> on accepted artifact: close_task(PID), persist progress/timings, continue next_task
+-> stop when next_task is None
+```
 
-候选来源至少考虑：
+Driver 可以记录 `progress.json`、`timings.json` 和普通日志；可以把 `prepare(reset=True)` 放在后台长跑；可以用 correction cap 防止无限返工。Driver 不得读取 stdout 当 artifact，不得修改 `artifact.json`，不得删除 invalid claim 继续 apply，不得同时启动多个 role worker，不得在关闭当前 PID 前进入下一 role。
 
-- 用户任务关键词或路径线索。
-- scope 下顶级目录、主要 anchors、近期目录。
-- 高价值文件类型：README、Office、PDF、文本、代码、manifest。
-- 已有 overlay 的 top anchors、top tags，以及可通过公开接口获得的 active/cold 信息。
-- fallback seeds。
-
-对于 large root，例如 `F:\`，先观察顶级目录或主要 anchors，再决定 bounded sample。不得用一组通用关键词代表整盘覆盖。
-
-## 3. Leaf Evidence Build
-
-Leaf build 只产生 leaf-level coverage。真实任务中的 `paths` 必须来自 Stage B。
-
-`candidate_paths_from_stage_b` 是路径字符串列表；若候选来自 `search_rows`，需要先取 `r["path"]`。
+常用入口：
 
 ```python
 import local_semantic_overlay as lso
 
-session = lso.BuildSession(SCOPE)
-paths = candidate_paths_from_stage_b
-session.add_candidates(len(paths))
-
-for row in lso.select_for_read(paths, seeds=[], fallback_seeds=[], limit=15):
-    session.try_read(row["path"])
-    leaf_id = session.ensure_leaf(row["path"])
-    prep = lso.prepare_leaf_tag_task(SCOPE, leaf_id)
-    if not prep["ok"]:
-        continue
-    task = prep["task"]  # text_head is semantic evidence; filename_hint is only a hint.
-    proposals = [{"tag": "...", "evidence_phrase": "...",
-                  "evidence_source": "text_head", "tag_role": "content_semantic"}]
-    session.propose_tags(leaf_id, proposals)
-
-audit = session.finalize()
+result = lso.run_build(
+    scope,
+    task_name="lso_build_name",
+    question="optional user task",
+    seeds=None,
+    reset=False,
+)
 ```
 
-`read_status == "readable"` 时，semantic evidence 只能来自 `text_head`。不可读 leaf 可以保留 `filename_hint`，但不产生 `semantic_tags`。
+需要长跑或轮询时，显式传入 `progress_path`、`timings_path`、`log_path`；需要从已有 `build_state.json` 继续时传 `prepare_first=False`。这些都是机械参数，不改变任何 role 的语义职责。
 
-## 4. 语义通道约束
+## 冷启动
 
-| 通道 | 含义 | 是否算 semantic coverage |
-| --- | --- | --- |
-| `semantic_tags` | 文件内容在讲什么，只能来自 `text_head` evidence | 是 |
-| `filename_hint` | 文件名主体线索，用于召回和展示 | 否 |
-| `location_tags` | 目录或位置线索 | 否 |
-| `source_channel` | 来源渠道，例如 chat/mail/download | 否 |
-| `path` | 路径字面线索 | 否 |
-
-约束：
-
-- Runtime 只查询 overlay，不写 overlay。
-- 只有 Build 阶段能写 leaf tags、metadata、nodes。
-- `semantic_tags` 不是 Agent 输入，而是 core 审计通过后的输出。
-- Agent 只能提交 TagProposal，不能直接写 `semantic_tags`。
-- `content_semantic.evidence_source` 只能是 `text_head`。
-- filename/path/source/location/fallback 不得进入 `content_semantic`。
-- metadata-only 不算 semantic coverage。
-
-## 5. TagProposal 契约
-
-```python
-result = lso.propose_leaf_tags(SCOPE, leaf_id, [
-    {"tag": "跨境贸易支付",
-     "evidence_phrase": "高性能可信跨境贸易支付监管关键技术研究",
-     "evidence_source": "text_head",
-     "tag_role": "content_semantic"}  # content_semantic | location | source_channel
-])
-```
-
-路由：
-
-| `tag_role` | 写入字段 | evidence |
-| --- | --- | --- |
-| `content_semantic` | `semantic_tags` | 必须，且贴回 `text_head` |
-| `location` | `location_tags` | 不需要 |
-| `source_channel` | `source_channel` | 不需要，单值 |
-
-成功路径是 full replacement：本次通过审计的结果会完整替换 leaf 上的 `semantic_tags`、`location_tags`、`source_channel`。错误路径不改 leaf。`ok=True` 不等于 `semantic_applied=True`。
-
-返回值要点：`accepted`、`rejected`、`semantic_tags`、`metadata`、`semantic_applied`、`metadata_applied`。
-
-## 6. Build Audit
-
-`session.finalize()` 返回 overlay 快照和 `process` 统计。`process` 是本轮 leaf build 的唯一统计来源，但不能单独证明 coverage task 已完成。
-
-必须关注：
+`prepare(scope, question, seeds, reset)` 通过 ES 获取可配置的价值信号：
 
 ```text
-process:
-candidate_path_count selected_count readable_count skipped_count
-proposal_count proposal_accepted proposal_rejected
-semantic_apply_ok metadata_apply_ok
-semantic_applied_count metadata_applied_count
-unique_leaf_before unique_leaf_after unique_leaf_delta
-apply_ok apply_fail proposal_log
-
-snapshot:
-unique_leaf_count tagged_leaf_count untagged_leaf_count
-node_count node_source_dist read_status_dist top_tags top_anchors
+recent access/create/modify, long-maintained files, mainstream project markers, docs, task seeds
 ```
 
-构建总结必须引用 `semantic_apply_ok` 作为 semantic coverage 入口，不能用 metadata-only、proposal accepted 或 apply attempt 冒充语义覆盖。
+每类信号有自己的机械预算；多类结果去重后持久化，不再做第二次全局截断。
 
-## 7. Node Eligibility 与 Node Build
+- `long_maintained` 只表示“修改时间 - 创建时间”达到配置时长；近期活跃不属于这个定义。
+- 如果一个目录下直接平铺文件数超过配置阈值，该目录下的直接文件不进入冷启动候选；显式 ES miss seeds 仍可进入增量维护。
+- `candidate_pool.json` 记录机械召回的候选文件和 signals。
+- `selector_ledger.json` 记录每个 Selector batch 的判断。
+- `base_overlay.json` 记录本次 cold/incremental run 之前的稳定 overlay。
+- `build_state.json` 记录当前 role 和 selector batch offset。
+- `coverage_report.json` 记录给独立 Auditor 使用的机械事实。
 
-Leaf build 后必须检查 node eligibility，不能直接用“停留 leaf sample”跳过。
+机械事实本身不决定通过或失败。最终 verdict 只由独立 Auditor 给出。
 
-检查：
+没有任何物理区域必须出现在 LSO 里。未进入 LSO 的路径不需要、也不应该获得 ignored tag。
 
-- 用 `top_anchors`、本轮 selected/readable paths、`proposal_log` 判断是否有主要 anchor。
-- 判断是否有重复主题、重复 tags、任务关键主题簇。
+## 角色
 
-执行：
-
-- 高价值 anchor：尝试 `prepare_compression_task` / `apply_compression`，或记录 `defer | expand | insufficient_evidence`。
-- 跨 anchor 主题簇：尝试 `prepare_aggregation_task` / `apply_aggregation`，或记录 `defer | insufficient_evidence`。
-- 无候选：记录 `no_node_candidate`。
-
-`node_count` 是 overlay 快照，不等于本轮 node build 成果。不得仅因 snapshot 中 `node_count > 0` 判定本轮达到 `node_coverage_built`。`node_coverage_built` 只能来自本轮新增/更新 node，或复用已有 node 且通过 runtime query 证明与当前任务相关。
-
-受控结果值：
+每个当前任务启动一个独立 CLI SubAgent：
 
 ```text
-compressed | aggregated | reused_existing_node | defer | expand | insufficient_evidence | no_node_candidate | not_run
+selector batches -> compressor -> tagger -> aggregator -> auditor -> complete
 ```
 
-## 8. Runtime Query 与 Validation
+1. `selector` 是 recall-preserving noise rejector，不是 high-value file selector。它接收 candidate paths、文件名和 source signals，只负责拒绝明确噪声，必须把当前 batch 的每个 candidate 明确归入 `retained` 或 `discarded`。不确定就 `retained`；看起来普通但可能有用也 `retained`。误留可以由下游恢复，误杀不可恢复。它不得排序、精选、判断“最重要文件”，也不得因为“低价值”“不中心”“不够像目标”而 discard。每个 `discarded` 都必须有明确 `noise_evidence`。它不创建 tag，也不创建 node。
 
-若要声明 `runtime_validated`，必须跑 2-5 个代表性 query，并报告 hit_type 分布。未验证时只能停留在 `leaf_sample_built` 或 `node_coverage_built`。
+2. `compressor` 只压缩成熟项目/工具/服务目录：必须同时看到入口文件、项目结构，并能命名为具体项目、工具或服务。同目录、同主题、同扩展名、同一批文档、或单个弱 marker 都不足以证明语义内聚；不满足时把 leaf 放进 `standalone_leaf_ids`。需要时可以通过 ES 查询附近结构。输出 `targets` 和 `standalone_leaf_ids`。
 
-```python
-res = lso.query(SCOPE, "检索词", limit=20)
-```
+3. `tagger` 读取可用内容或明确的替代 evidence channel，只给 Compressor 显式给出的 `tag_targets` 产出有 evidence 支撑的 claims。`tag_targets` 包括 standalone leaves 和 compressed nodes；supporting leaves 只是证据，不是单独打标签目标。它可以调用 `memory/local_semantic_overlay/document_extract.py::extract_text` 读取 PDF/Office/text targets。如果高价值 target 只是因为本地 reader 依赖缺失而不可读，SubAgent 可以在 `temp/` 下临时创建 reader environment 或工具，并在 `source` 里说明具体方法。每个 target 应在证据支持时产出 2-5 个尽量不同方向的 tag，例如主题、材料类型、工作流、领域、项目/服务、动作；单个泛 tag 是异常，不是默认。filename-only evidence 不得伪装成 file-content evidence。
 
-每个 hit 必须看 `hit_type` 和 `match_reasons`：
+4. `aggregator` 只读取已有 leaves、nodes、tags 和 claims。它把相近 tags 聚合成 facet nodes 和 semantic nodes，也可以继续聚合这些 nodes。它只维护 support 和 derivation 关系，不添加其他关系类型。
 
-| hit_type | 含义 |
-| --- | --- |
-| `semantic_node` | 来自 compressed / aggregated node |
-| `leaf_tag` | 来自已审计 leaf semantic tags |
-| `filename_hint` | 文件名主体命中，不等于内容语义 |
-| `metadata` | `location_tags` / `source_channel` 命中 |
-| `path` | 路径字面命中 |
-| `fallback` | 搜索适配器召回，只能作为下一轮候选 |
+5. `auditor` 独立审查 artifacts、ledgers 和最终 map。它判断语义有用性，不只看结构合法性：非成熟项目/工具/服务目录的压缩、系统性单 tag targets、浅层或无帮助的聚合，都需要 rework，除非有充分理由。它永远不写 overlay。失败时，它的 evidence 指明 `rework_role`；`apply_stage()` 会恢复稳定 base，重放已接受的上游 artifacts，并返回该 role 的 next task。主 Agent 永远不修 auditor artifact。
 
-如果结果主要来自 `filename_hint` / `metadata` / `path` / `fallback`，只能说明 overlay 有文件线索价值，不能说明 semantic coverage 已经有效。
+## Artifact 规则
 
-## 9. Bounded Report 模板
+- 正式输出只能是 `artifact.json`；不得从 stdout 解析 artifact。
+- 被拒绝的 artifact 只能由对应 role SubAgent 根据 `reply.txt` 修正。
+- artifact 的 `role` 必须等于当前 stage。
+- 未知顶层字段直接失败。
+- 每个 Selector batch path 必须被且仅被分类一次。
+- 每个 retained leaf 必须被 Compressor target 覆盖，或列入 `standalone_leaf_ids`。
+- Compressor nodes 必须有 supporting leaves，且只表达成熟项目/工具/服务边界；它们不意味着完整读取了整个目录。
+- Tagger claims 必须引用显式 Compressor tag target，并包含 tag、evidence 和 source；系统性单 tag target 应由 Auditor 打回。
+- Aggregator 不得新增 support 和 derivation 以外的关系类型。
 
-最终报告必须绑定本轮 run state，不得越级。
+## 运行时
 
 ```text
-本轮状态：<leaf_sample_built | node_coverage_built | runtime_validated>
-scope: ...
-scope_type: ...
-build_mode: ...
-
-候选与读取：candidate=..., selected=..., readable=..., skipped=...
-语义写入：semantic_apply_ok=..., metadata_apply_ok=..., unique_leaf_delta=...
-节点状态：node_count=..., compression_checked=<yes/no>, aggregation_checked=<yes/no>, result=...
-验证状态：runtime_validation=<not_run | run>, hit_type_dist=...
-
-边界：本轮主要覆盖 ...；未覆盖 ...
-结论：本轮只能表述为 ...
+query LSO -> follow tag/node to files
+miss -> query ES -> prepare(scope, question=query, seeds=hits, reset=False)
+     -> selector/compressor/tagger/aggregator/auditor
 ```
 
-除非有穷尽性证据，不得使用“完整覆盖”“覆盖完成”“所有文件”“本机全部”“F 盘语义覆盖完成”。
+带 seeds 的增量 run 只处理这些 ES hits。没有 seeds 的增量 `prepare()` 才会做更宽的价值信号刷新。运行时 query 本身保持词面匹配，不自动启动 SubAgents。
 
-## 10. Feedback 与拒绝原因
+## 已验证的操作注意事项
 
-只有显式反馈才能写入 feedback；不要把“query 没命中”推断成负反馈。
-
-```python
-lso.record_feedback(SCOPE, result_id="q1", kind="selected|not_selected|negative", node_id="node_xxx")
-```
-
-常见拒绝原因：`missing_evidence`、`weak_evidence`、`invalid_tag_role`、`invalid_evidence_source`、`no_evidence_source`、`evidence_not_grounded`、`duplicate_tag`、`multiple_source_channel`、`tag_is_extension`、`tag_is_dir_token`、`no_tags_accepted`、`brief_not_grounded`、`recursive_aggregation`。
+- 大 scope，例如整盘和约 170 万文件的 census，会让 `prepare(reset=True)` 远超 300 秒工具超时。应作为后台进程运行并轮询输出文件；长时间 census 是正常现象，不等于卡死。
+- 整个 dispatch loop 是机械流程，语义判断都在 SubAgents 里。完整 build 默认走标准 Driver；主 Agent 仍然不得编辑 artifact。
+- Auditor 阶段结束后 build 是 `complete`；此时调用 `lso.task(scope)` 会抛 `KeyError: 'complete'`。这是预期行为，因为没有 pending task。验证结果应使用 `lso.load(scope)` 查看 leaves/nodes 数量，用 `lso.query(scope, q)` 查看查询效果。

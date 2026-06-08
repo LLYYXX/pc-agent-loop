@@ -1,0 +1,186 @@
+{
+  "ignore_dirs": [
+    ".git",
+    ".svn",
+    ".hg",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "target",
+    ".cache",
+    ".next",
+    "$RECYCLE.BIN",
+    "System Volume Information"
+  ],
+  "text_ext": [
+    ".md",
+    ".txt",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".csv",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".xml"
+  ],
+  "document_ext": [
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx"
+  ],
+  "binary_ext": [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".svg",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".wav",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".bin",
+    ".dat",
+    ".pkl",
+    ".wasm",
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".db-wal",
+    ".db-shm"
+  ],
+  "marker_names": [
+    "README",
+    "README.md",
+    "readme.md",
+    "Makefile",
+    "makefile",
+    "CMakeLists.txt",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+    "Cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "composer.json",
+    "Gemfile",
+    "pubspec.yaml",
+    "mix.exs",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml"
+  ],
+  "noise_patterns": [
+    "^~\\$",
+    "\\.tmp$",
+    "\\.temp$",
+    "\\.log$",
+    "\\.pyc$",
+    "^\\.DS_Store$",
+    "^Thumbs\\.db$",
+    "^desktop\\.ini$"
+  ],
+  "discovery_buckets": [
+    {
+      "name": "project_marker",
+      "limit": 400,
+      "queries": [
+        "readme",
+        "makefile",
+        "cmakelists.txt",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "pipfile",
+        "poetry.lock",
+        "cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "settings.gradle",
+        "composer.json",
+        "gemfile",
+        "pubspec.yaml",
+        "mix.exs",
+        "dockerfile",
+        "docker-compose.yml",
+        "ext:sln;csproj;fsproj;vbproj"
+      ]
+    },
+    {
+      "name": "docs",
+      "limit": 300,
+      "queries": [
+        "ext:md;txt;rst;pdf;doc;docx;ppt;pptx;xls;xlsx"
+      ]
+    },
+    {
+      "name": "recent",
+      "limit": 750,
+      "queries": [
+        {
+          "signal": "windows_recent",
+          "query": "windows_recent:"
+        },
+        {
+          "signal": "recent_modified",
+          "query": "dm:last14days"
+        },
+        {
+          "signal": "recent_created",
+          "query": "dc:last14days"
+        }
+      ]
+    },
+    {
+      "name": "maintained",
+      "limit": 250,
+      "queries": [
+        {
+          "signal": "long_maintained",
+          "query": "maintained:180d"
+        }
+      ]
+    }
+  ],
+  "mechanical_candidate_limit": 1000,
+  "flat_dir_file_limit": 1000,
+  "selector_batch_size": 200,
+  "cold_start_retained_target": 100,
+  "size_cap_bytes": 5000000
+}

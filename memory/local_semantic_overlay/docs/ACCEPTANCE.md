@@ -1,76 +1,76 @@
-# LSO 最高契约 (ACCEPTANCE)
+# LSO Acceptance Contract
 
-> 本文件由人定、冻结、只读。master / worker 不得改写。
-> 它只定义 WHAT（不可再降的根不变量），不定义 HOW。
-> HOW（逻辑行怎么数、provenance 通道怎么存、采样状态字段、消融指标/阈值、
-> audit 问题清单逐条措辞）由审计 Agent / 消融实验 / 人审流程承载。
+## Product
 
-## 定位
+1. Product shape is `tag -> semantic node -> leaf/node -> file`.
+2. LSO covers commonly used, high-value files; it does not require physical
+   region or full-disk coverage.
+3. Cold files remain in ES. Absence from LSO creates no ignored tag.
+4. One file may support multiple semantic nodes; aggregate nodes may form more
+   than one semantic level.
+5. Nodes keep `supporting_leaf_ids`; `derived_from_ids` is lineage only.
+6. Core validates, materializes, saves, and queries. It makes no semantic
+   judgments.
 
-LSO 是 GA 的本地文件语义覆盖索引：产出 `tag → node → leaf → file` 的可导航链路，
-让文件任务用"查链路"替代"猜关键词盲搜 ES"。
-语义、路径、目录、文件名、元信息及其 provenance 是链路的支撑数据，不是产品本体。
+## Build
 
-## 产品不变量
+7. Discovery uses ES/Everything only and configurable per-signal recall budgets.
+   Long-maintained means `modified_time - created_time >= configured days`; it
+   is not redefined as recent activity.
+8. The deduplicated bucket union is not globally truncated before semantic
+   filtering.
+   Direct files under a flat parent directory with more than the configured
+   file-count threshold are skipped in cold-start discovery.
+9. Selector is a recall-preserving noise rejector. It classifies every batch
+   item exactly once as `retained` or `discarded`; uncertain and merely ordinary
+   files are retained. Every discard requires explicit noise evidence. It
+   creates no tags or nodes and receives no count target.
+10. Compressor is an independent role. It may compress only mature
+    project/tool/service directories with an entry file, project structure, and
+    concrete name; shared directory/topic/extension or one weak marker is not
+    enough. No complete-directory read is required or implied.
+11. Compressor accounts for every retained leaf through a target or
+    `standalone_leaf_ids`.
+12. Tagger claims require an explicit Compressor tag target, tag, evidence, and
+    source. Only standalone leaves and compressed nodes are tag targets;
+    supporting leaves are evidence-only. Targets should receive multiple
+    facet-diverse tags when evidence supports it; systematic single-tag targets
+    require rework unless justified. Difficult formats may use explicit
+    non-content evidence but cannot pretend it is content.
+13. Aggregator uses existing artifacts only and creates support/derivation
+    relationships, not a complex knowledge graph.
+14. Auditor is independent, never writes the overlay, and returns evidence for
+    `rework_role` when it does not pass. The control plane re-dispatches that
+    role after mechanically rewinding that role and downstream materialization.
+    It judges semantic usefulness, including systematic single-tag targets and
+    shallow aggregation. Mechanical audit facts never become a code gate; the
+    Auditor verdict decides.
 
-1. **导航链是本体**
-   LSO 产出 tag→node→leaf→file 可导航链路。其它数据是支撑，不是本体。
+## Integration
 
-2. **core 只物化、不判断**
-   core 是导航链的物化与维护机器：给定已审核 proposal，负责校验、提交、存储、
-   更新、查询和命中解释。语义单元的产生、筛选、压缩、打标签、聚合、覆盖规划
-   一律在执行层，不在 core。
+15. Cold start uses GA's existing CLI file-IO SubAgent protocol from
+    `memory/subagent.md`; LSO modifies no GA, Conductor, or SubAgent body code.
+16. Each role writes formal `artifact.json`; stdout is never parsed as an
+    artifact.
+17. The main Agent dispatches and observes only. It does not act as a role,
+    generate role scripts, edit `artifact.json`, trim fields, delete invalid
+    claims, or otherwise repair artifacts. Rejected artifacts are returned
+    through `reply.txt` and rewritten by the same role SubAgent.
+18. LSO dispatch is serial. It retains the CLI SubAgent's printed PID and closes
+    the current process before dispatching the next role.
+19. No case-specific path, domain, or user-sample rules exist in code, config,
+    prompts, SOP, tests, or docs.
 
-3. **可摘除**
-   执行层整体摘除后，core 仍能基于 replay proposal 与已有 overlay state
-   完成提交、维护、查询和导航；但 core 不能独立从原始文件生成任何语义判断
-   （高价值判断、tag、node 聚合、语义解释）。
+## Size And Checks
 
-4. **轻量性是检验器，且不可被搬运规避**
-   core 保持低假设容量、低内建知识、低语义权力、低侵入；core <1000 行只是代理指标，
-   不是行数崇拜。达标只许靠剥离能力，不许压格式；不计入行数的 SOP / prompt / 配置
-   不得承载 case-specific 路径规则、业务分类或硬编码语义策略，否则视为未轻量。
+- Final code (`__init__.py + overlay.py + select.py + runner.py +
+  ga_multiagent.py`) is under 600 physical lines.
+- `runner.py` is under 300 physical lines.
+- `search.py`, `document_extract.py`, config, verifier, and tests are excluded
+  from final code.
+- `search.py`, `config.json`, verifier, and tests are excluded from final code.
 
-5. **单写入**
-   只有一条代码路径能写 overlay 主索引；建造期 Agent / SubAgent 只交 proposal。
-
-6. **多源信号、分立可溯、不伪 semantic**
-   语义证据、路径、目录、文件名、元信息都是合法信号来源，都必须保留并标明 provenance 通道；
-   命中可以是多通道组合，但 semantic 命中必须来自已存在的 tag/node/leaf 语义链路，
-   不能仅由文件名 / 路径 / 元信息推导冒充。
-
-7. **覆盖状态是链路结构的一部分，不自欺**
-   覆盖 / 采样状态必须可在链路中表达并随查询和报告保留（覆盖边界、采样与否、
-   fresh/stale、已知未覆盖区域 / 未确认区域）。基于采样产生的 node/leaf 可进入链路，但任何结论
-   不得把采样说成完整覆盖；case-specific 调参默认拒绝。
-
-8. **持续更新是维护，不是重规划**
-   持续更新只维护已有链路状态（freshness/stale/warm-cold、文件存在性、变更探测）
-   并应用 proposal-based 修订；任何重新筛选、重新打标签、重新聚合都必须作为
-   执行层 proposal 重新进入 core，core 不得自行发起语义重规划。
-
-9. **可归因（C vs D）**
-   收益必须能区分来自 LSO 导航链 / overlay index（C：已构建链路是否比搜索更稳、
-   可复用、可解释），还是来自 Agent / SubAgent 构建与更新编排
-   （D：多智能体建造是否产出更高质量的链路；D 主要是建造期收益，
-   非每个运行期任务都开 SubAgent）。
-
-10. **真有用**
-    未经调参的真实文件任务走运行期路径，比盲搜更稳、可复用、可解释。
-
-## 过程不变量
-
-11. **审核与判定分离，判官独立**
-    master / 大脑只能整理 proposal、发起复核、准备准备写入请求 / 绿色基线提交请求；
-    是否通过由独立审计 Agent（用冻结的问题清单出 verdict，留痕可查）和人审决定。
-    audit 必须基于 proposal、provenance、artifact、源码差异和本契约判定，
-    不得只看 master 的自然语言总结，也不得由被审对象自评替代。
-    "审核"不等于"判定通过"。
-
-12. **commit 锁死，主索引与日志分离**
-    Git commit 仅在人审确认 audit pass 后由人执行，用于固化新的绿色 baseline；
-    master / Conductor / SubAgent 无手工 Git commit、无"有条件合入"核心交付物的权力。
-
-    overlay 主索引只能通过单写入入口写入；master 不直接写 overlay。
-    未通过的 proposal 不得进入 overlay 主索引，但可进入 run log / audit log
-    以追踪失败原因。
+```text
+python memory/local_semantic_overlay/verify_lines.py
+python -m unittest test_lso.test_compact_lso -v
+```
