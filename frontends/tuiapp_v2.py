@@ -59,6 +59,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.geometry import Region
     from textual.message import Message
     from textual.screen import ModalScreen
     from textual.widget import Widget
@@ -749,6 +750,29 @@ FRONTENDS_DIR = os.path.dirname(os.path.abspath(__file__))
 if FRONTENDS_DIR not in sys.path:
     sys.path.insert(0, FRONTENDS_DIR)
 
+_TASK_DIR_GLOB = os.path.join(FRONTENDS_DIR, '..', 'temp', '_tui_v2_*')
+
+
+def _rmdir_if_empty(path: Optional[str]) -> None:
+    """Best-effort remove a signal task_dir once it holds no in-flight files.
+    `os.rmdir` only succeeds on an empty dir, so a stray `_intervene` still
+    pending consumption is never clobbered."""
+    if not path:
+        return
+    try: os.rmdir(path)
+    except OSError: pass
+
+
+def _sweep_stale_task_dirs() -> None:
+    """Delete empty `temp/_tui_v2_*` signal dirs left by prior runs (incl.
+    crashes).  Empty == no pending signal, so removal is safe even while
+    another live instance owns one — its writer re-creates lazily on the
+    next inject."""
+    import glob as _glob
+    for d in _glob.glob(_TASK_DIR_GLOB):
+        if os.path.isdir(d):
+            _rmdir_if_empty(d)
+
 # Side-effect imports activate /btw + /continue monkey-patches.
 import chatapp_common  # noqa: F401
 from chatapp_common import format_restore
@@ -1020,14 +1044,28 @@ Screen { background: $ga-bg; color: $ga-fg; }
 
 #body { height: 1fr; }
 
-#sidebar {
+/* Outer scroll container owns the geometry (width/height/border) and the
+   scrolling; the inner #sidebar Static keeps the padding so the click
+   hit-test math in on_click (event.y - 3) is unchanged. */
+#sidebar-scroll {
     width: 34;
     height: 100%;
     background: $ga-bg;
-    padding: 1 2;
     border-right: solid $ga-alt-bg;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-size: 0 1;
+    /* Reserve the 1-col scrollbar gutter up front so overflowing the window
+       doesn't suddenly squeeze the session rows narrower. */
+    scrollbar-gutter: stable;
 }
-#sidebar.-hidden, #sidebar.-narrow { display: none; }
+#sidebar-scroll.-hidden, #sidebar-scroll.-narrow { display: none; }
+
+#sidebar {
+    width: 1fr;
+    height: auto;
+    padding: 1 2;
+}
 
 #main {
     height: 100%;
@@ -1356,6 +1394,29 @@ class ChoiceList(OptionList):
         except Exception:
             pass
 
+    def on_key(self, event) -> None:
+        # Inside `/continue`'s SearchablePicker, Up on the first row returns
+        # focus to the search box (mirrors Down going search → list), closing
+        # the navigation loop. No-op for ChoiceLists mounted outside a
+        # SearchablePicker (other pickers have no `_search_input` parent), so
+        # this stays scoped to `/continue`.
+        if event.key != "up":
+            return
+        search = getattr(self.parent, "_search_input", None)
+        if search is None:
+            return
+        if self.highlighted not in (None, 0):
+            return
+        try:
+            # Clear the highlight on the way out so the search box doesn't show
+            # row 0 as still-selected, and the next Down re-enters at the first
+            # row (cursor_down from None → 0) instead of skipping to the second.
+            self.highlighted = None
+            search.focus()
+        except Exception:
+            pass
+        event.stop(); event.prevent_default()
+
 
 class LazyChoiceList(ChoiceList):
     """ChoiceList that materializes options in bounded batches.
@@ -1683,14 +1744,30 @@ class SearchableChoiceList(Vertical):
         if not self._search_input.has_focus:
             return
         key = event.key
-        if key in ("down", "up", "pageup", "pagedown", "home", "end"):
+        if key == "up":
+            # Up from the search box wraps around to the BOTTOM of the list, so
+            # the loop is search ↓→ list top ... list top ↑→ search ↑→ list
+            # bottom. Land on the last row directly.
+            try:
+                self.picker.focus()
+                last = getattr(self.picker, "action_last", None)
+                if last is not None:
+                    last()
+                else:
+                    n = getattr(self.picker, "option_count", 0)
+                    if n:
+                        self.picker.highlighted = n - 1
+            except Exception:
+                pass
+            event.stop(); event.prevent_default()
+            return
+        if key in ("down", "pageup", "pagedown", "home", "end"):
             try:
                 self.picker.focus()
                 # Replay one step so the very first arrow doesn't get swallowed
                 # by the focus change. Subsequent arrows go straight to the picker.
                 action = {
                     "down": self.picker.action_cursor_down,
-                    "up": self.picker.action_cursor_up,
                     "pagedown": getattr(self.picker, "action_page_down", None),
                     "pageup": getattr(self.picker, "action_page_up", None),
                     "home": getattr(self.picker, "action_first", None),
@@ -1702,6 +1779,18 @@ class SearchableChoiceList(Vertical):
                 pass
             event.stop(); event.prevent_default()
             return
+        if key == "right":
+            # Right commits the highlight ONLY when the caret is already at the
+            # end of the query — otherwise let the Input consume it so Right
+            # still moves the caret within the search text (the box must stay
+            # editable). Without this guard Right was always swallowed and the
+            # cursor could never move right inside `/continue`'s search box.
+            try:
+                at_end = self._search_input.cursor_position >= len(self._search_input.value or "")
+            except Exception:
+                at_end = True
+            if not at_end:
+                return
         if key in ("enter", "right"):
             try:
                 self.picker.action_select()
@@ -2739,7 +2828,9 @@ class GenericAgentTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
         with Horizontal(id="body"):
-            yield Static("", id="sidebar")
+            _sidebar = VerticalScroll(Static("", id="sidebar"), id="sidebar-scroll")
+            _sidebar.can_focus = False
+            yield _sidebar
             with Vertical(id="main"):
                 yield VerticalScroll(id="messages")
                 yield Static("", id="planbar")
@@ -2760,6 +2851,7 @@ class GenericAgentTUI(App[None]):
         yield Static(render_bottombar(), id="bottombar")
 
     def on_mount(self) -> None:
+        _sweep_stale_task_dirs()  # clear empty signal dirs left by prior runs
         self.add_session("main")
         self._system(f"Welcome to GenericAgent TUI. 按 / 唤起命令面板，{fmt_key('ctrl+n')} 新建会话。")
 
@@ -2774,10 +2866,7 @@ class GenericAgentTUI(App[None]):
         # Disable alternate scroll mode (?1007). Textual enables ?1006 SGR mouse but doesn't
         # turn off ?1007, which on macOS Terminal / iTerm2 makes the wheel emit both mouse
         # events and ↑/↓ keys — triggering InputArea history nav.
-        try:
-            sys.__stdout__.write("\x1b[?1007l"); sys.__stdout__.flush()
-        except Exception:
-            pass
+        self._term_write("\x1b[?1007l")
 
     def _tick(self) -> None:
         # 0.5s poll: refresh clock + detect resizes Windows misses (snap, fullscreen).
@@ -2861,13 +2950,16 @@ class GenericAgentTUI(App[None]):
         agent = self.agent_factory()
         try: agent.inc_out = True
         except Exception: pass
-        # Per-session task_dir enables ga's `_stop` / `_keyinfo` consume
-        # paths (agentmain.py:158, ga.py:575).  PID+session scoped so
-        # concurrent sessions don't share signal files.
+        # Per-session task_dir path enables ga's `_intervene` / `_keyinfo`
+        # consume paths (ga.py:575).  PID+session scoped so concurrent
+        # sessions don't share signal files.  We only set the *path* here —
+        # the dir is created lazily by the writer (`_session_intervene_path`)
+        # when a signal is actually injected.  Eager makedirs left a stale
+        # empty `temp/_tui_v2_<pid>_<id>` behind for every session that never
+        # used intervene; `consume_file` tolerates a missing dir.
         try:
             agent.task_dir = os.path.join(FRONTENDS_DIR, '..', 'temp',
                                           f'_tui_v2_{os.getpid()}_{agent_id}')
-            os.makedirs(agent.task_dir, exist_ok=True)
         except Exception:
             pass
         sess = AgentSession(agent_id=agent_id, name=name or f"agent-{agent_id}", agent=agent)
@@ -2933,17 +3025,10 @@ class GenericAgentTUI(App[None]):
         self._refresh_all()
 
     def copy_to_clipboard(self, text: str) -> None:
-        """Override Textual's OSC 52 clipboard (broken on macOS Terminal.app).
-        Use pbcopy on macOS, fall back to OSC 52 on other platforms."""
-        import sys, subprocess as _sp
-        if sys.platform == "darwin":
-            try:
-                _sp.Popen(["pbcopy"], stdin=_sp.PIPE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL).communicate(text.encode("utf-8"))
-                self._clipboard = text
-                return
-            except Exception:
-                pass
-        # Non-macOS or pbcopy failed: fall back to Textual default (OSC 52)
+        self._clipboard = text
+        _ssh = os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")
+        if not _ssh and _copy_to_clipboard(text):
+            return
         super().copy_to_clipboard(text)
 
     def action_handle_ctrl_c(self) -> None:
@@ -3022,7 +3107,7 @@ class GenericAgentTUI(App[None]):
         # via a short timer (call_after_refresh alone races the layout and the
         # remount can capture the old content_region.width — leaving messages
         # wrapped at the previous width after Ctrl+B).
-        sidebar = self.query_one("#sidebar", Static)
+        sidebar = self.query_one("#sidebar-scroll", VerticalScroll)
         sidebar.toggle_class("-hidden")
         for sess in self.sessions.values():
             for m in sess.messages:
@@ -3294,7 +3379,7 @@ class GenericAgentTUI(App[None]):
 
     def _apply_responsive_layout(self) -> None:
         try:
-            sidebar = self.query_one("#sidebar", Static)
+            sidebar = self.query_one("#sidebar-scroll", VerticalScroll)
             main = self.query_one("#main", Vertical)
         except Exception:
             return
@@ -3690,7 +3775,8 @@ class GenericAgentTUI(App[None]):
     def _cmd_close(self, args, raw):
         if len(self.sessions) <= 1:
             self._system("Cannot close the last session."); return
-        del self.sessions[self.current_id]
+        closed = self.sessions.pop(self.current_id)
+        _rmdir_if_empty(getattr(closed.agent, 'task_dir', None))
         self.current_id = next(iter(self.sessions))
         self._refresh_all()
 
@@ -4527,7 +4613,9 @@ class GenericAgentTUI(App[None]):
         self._system("\n".join(lines))
 
     def _reset_terminal_title(self) -> None:
-        # Send via sys.__stdout__ — see _update_terminal_title for why.
+        # Direct write on purpose: this runs at teardown when frames have stopped
+        # (so there's no writer-thread race to avoid) and the driver may already
+        # be stopped (enqueued writes would be silently dropped). See _term_write.
         try:
             out = sys.__stdout__
             out.write("\x1b]0;\x07")
@@ -4537,6 +4625,10 @@ class GenericAgentTUI(App[None]):
 
     def on_unmount(self) -> None:
         self._reset_terminal_title()
+        # Drop this run's empty signal dirs on graceful exit; the startup
+        # sweep mops up anything a crash leaves behind.
+        for s in list(self.sessions.values()):
+            _rmdir_if_empty(getattr(s.agent, 'task_dir', None))
 
     def _run_shell(self, cmd: str) -> None:
         """`!cmd` magic: run `cmd` in the user's shell (Git Bash / pwsh /
@@ -5241,6 +5333,30 @@ class GenericAgentTUI(App[None]):
         self._ensure_title_timer()
         self._update_terminal_title()
 
+    def _term_write(self, data: str) -> None:
+        """Emit a raw control sequence to the terminal THROUGH Textual's driver.
+
+        Direct sys.__stdout__ writes race Textual's background WriterThread at the
+        byte level: an OSC/control sequence injected mid-frame splits one of
+        Textual's own escape sequences, and the terminal renders the wreckage as
+        flashing ANSI garbage (cleared by the next frame). Reproduces reliably by
+        switching sessions while streaming, when the title ticker fires often.
+        Routing through self._driver.write enqueues the sequence on the same
+        serialized writer queue as the frames, so it lands atomically between
+        them. Falls back to __stdout__ before the driver exists / in headless.
+        """
+        drv = getattr(self, "_driver", None)
+        if drv is not None:
+            try:
+                drv.write(data)
+                return
+            except Exception:
+                pass
+        try:
+            sys.__stdout__.write(data); sys.__stdout__.flush()
+        except Exception:
+            pass
+
     def _update_terminal_title(self) -> None:
         # OSC 0 (set window + icon title). Mainstream terminals consume it: Windows
         # Terminal, mintty (MinGW64/MSYS), iTerm2, Terminal.app, kitty, alacritty,
@@ -5259,12 +5375,8 @@ class GenericAgentTUI(App[None]):
             title = f"{name} · GenericAgent"
         if title == self._last_title: return
         self._last_title = title
-        try:
-            out = sys.__stdout__
-            out.write(f"\x1b]0;{title}\x07")
-            out.flush()
-        except Exception:
-            pass
+        # Serialize through the driver — see _term_write for the race this avoids.
+        self._term_write(f"\x1b]0;{title}\x07")
 
     def _ensure_title_timer(self) -> None:
         busy = any(x.status == "running" for x in self.sessions.values())
@@ -5295,6 +5407,27 @@ class GenericAgentTUI(App[None]):
     def _refresh_sidebar(self):
         if not self.is_mounted: return
         self.query_one("#sidebar", Static).update(render_sidebar(self.sessions, self.current_id))
+        self._scroll_active_session_into_view()
+
+    def _scroll_active_session_into_view(self) -> None:
+        # Keyboard session-switching (ctrl+up/down) can land on a session below
+        # the fold; mirror on_click's row math to bring its block into view.
+        if self.current_id is None:
+            return
+        try:
+            scroll = self.query_one("#sidebar-scroll", VerticalScroll)
+        except Exception:
+            return
+        y = 3  # pad-top(1) + "SESSIONS"(1) + blank(1), matches on_click
+        for sid, sess in self.sessions.items():
+            rows = 3
+            if _sidebar_last_user(sess): rows += 1
+            if _sidebar_last_summary(sess): rows += 1
+            if sid == self.current_id:
+                self.call_after_refresh(scroll.scroll_to_region,
+                                        Region(0, y, 1, rows), animate=False)
+                return
+            y += rows
 
     def _at_bottom(self, container) -> bool:
         try:
@@ -5825,7 +5958,16 @@ class GenericAgentTUI(App[None]):
                     last_widget.update(rendered)
             else:
                 last_widget._ga_render = None
-                last_widget.update(Text.from_ansi(last_text, style=C_FG))
+                # Normalise CRLF → LF before from_ansi. On Windows child stdout
+                # is `\r\n`; from_ansi treats `\r` as a carriage return, so each
+                # line's text gets overwritten/erased by its own trailing `\r`
+                # and the whole `[Stdout]` block renders as blank lines until the
+                # turn finishes (the done-state Markdown render strips `\r`). We
+                # show the output as-is otherwise — blank-line runs are left for
+                # Markdown to fold on completion. Lone `\r` (no `\n`) is kept so
+                # progress-bar overwrites still work.
+                display = last_text.replace("\r\n", "\n")
+                last_widget.update(Text.from_ansi(display, style=C_FG))
             if m.done and m._spinner_widget is not None:
                 # Convert the live spinner into the post-turn ⠿ card in place.
                 self._capture_done_summary(m)

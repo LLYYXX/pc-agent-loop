@@ -42,6 +42,10 @@ def get_system_prompt():
     prompt += get_global_memory()
     return prompt
 
+# SDK:
+# agent = GenericAgent(); threading.Thread(target=agent.run, daemon=True).start()
+# output1_queue = agent.put_task(prompt1)
+# output2_queue = agent.put_task(prompt2)
 class GenericAgent:
     def __init__(self):
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
@@ -50,10 +54,11 @@ class GenericAgent:
         self.history = []; self.handler = None; 
         self.task_queue = queue.Queue() 
         self.is_running = False; self.stop_sig = False; self.llm_no = 0;  
-        self.inc_out = False; self.verbose = True; self.show_mode = 'text'
+        self.inc_out = False; self.verbose = True
         self.peer_hint = True
         self.force_non_stream = False
-        self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
+        logid = f'{(time.time_ns() + random.randrange(1_000_000)) % 1_000_000:06d}'
+        self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{logid}.txt')
         self.load_llm_sessions()
 
     def load_llm_sessions(self):
@@ -129,12 +134,13 @@ class GenericAgent:
     def run(self):
         while True:
             task = self.task_queue.get()
+            if isinstance(task, str): break
             raw_query, source, display_queue = task["query"], task["source"], task["output"]
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
             self.is_running = True
-            if len(raw_query) > 1500:
+            if len(raw_query) > 2000:
                 task_file = os.path.join(script_dir, 'temp', f'user_prompt_{int(time.time())}.md')
                 with open(task_file, 'w', encoding='utf-8') as f: f.write(raw_query)
                 raw_query = f'Long user prompt saved to {task_file}. Read and execute.'
@@ -144,6 +150,7 @@ class GenericAgent:
             sys_prompt = get_system_prompt() + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
+            if getattr(self, 'no_print', False): handler.print = lambda *a, **k: None
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
                 handler.working['key_info'] = ki
@@ -168,8 +175,9 @@ class GenericAgent:
                         display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 
                                            'source': source, 'turn': curr_turn, 'outputs': turn_resps[-2:]})
                         last_pos = len(full_resp)
-                if self.inc_out and last_pos < len(full_resp): display_queue.put({'next': full_resp[last_pos:], 'source': source, 
-                                                                                  'turn': curr_turn, 'outputs': turn_resps[-2:]})
+                if self.inc_out and last_pos < len(full_resp):
+                    display_queue.put({'next': full_resp[last_pos:], 'source': source,
+                                    'turn': curr_turn, 'outputs': turn_resps[-2:]})
                 #if '</summary>' in full_resp: full_resp = full_resp.replace('</summary>', '</summary>\n\n')
                 #if '</file_content>' in full_resp: full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)                
                 display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
@@ -183,7 +191,7 @@ class GenericAgent:
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.code_stop_signal.append(1)
 
-GeneraticAgent = GenericAgent    
+GeneraticAgent = GenericAgent
 
 if __name__ == '__main__':
     import argparse

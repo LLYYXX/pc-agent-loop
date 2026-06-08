@@ -377,7 +377,7 @@ You're also welcome to join the **GenericAgent Community Group** for discussion,
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>WeChat Group 20</strong><br/><img src="assets/images/wechat_group20.jpg" alt="WeChat Group 20 QR" width="240"/></td>
+      <td align="center"><strong>WeChat Group 21</strong><br/><img src="assets/images/wechat_group21.jpg" alt="WeChat Group 21 QR" width="240"/></td>
     </tr>
   </table>
 </div>
@@ -391,7 +391,7 @@ Thanks to the **LinuxDo** community for the support!
 **Community GUIs** *(independent open-source projects)*:
 
 - [chilishark27/ga-manager](https://github.com/chilishark27/ga-manager)
-- [wangjc683/galley](https://github.com/wangjc683/galley)
+- [wangjc683/galley](https://github.com/wangjc683/galley) — Out-of-the-box local agent workbench with a bundled GA runtime (CPython 3.11 + deps), native GUI/CLI, multi-session + Project orchestration, local-first.
 - [FroStorM/A3Agent](https://github.com/FroStorM/A3Agent/tree/workbench)
 
 ---
@@ -751,7 +751,7 @@ GenericAgent 通过 **分层记忆 × 最小工具集 × 自主执行循环** �
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>微信群 20</strong><br/><img src="assets/images/wechat_group20.jpg" alt="微信群 20 二维码" width="240"/></td>
+      <td align="center"><strong>微信群 21</strong><br/><img src="assets/images/wechat_group21.jpg" alt="微信群 21 二维码" width="240"/></td>
     </tr>
   </table>
 </div>
@@ -765,7 +765,7 @@ GenericAgent 通过 **分层记忆 × 最小工具集 × 自主执行循环** �
 **社区 GUI 客户端** *（独立开源项目）*：
 
 - [chilishark27/ga-manager](https://github.com/chilishark27/ga-manager)
-- [wangjc683/galley](https://github.com/wangjc683/galley)
+- [wangjc683/galley](https://github.com/wangjc683/galley) —— 开箱即用的本地 Agent 工作台，自带 GA 内核（内置 CPython 3.11 + 运行依赖），GUI/CLI 双原生、多 session + Project 编排、本地优先。
 - [FroStorM/A3Agent](https://github.com/FroStorM/A3Agent/tree/workbench)
 
 ---
